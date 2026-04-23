@@ -30,14 +30,13 @@ class CarConfig {
     this.tireGrip = opts.tireGrip ?? 2.0;
     this.lockGrip = opts.lockGrip ?? 0.82;
     this.engineForce = opts.engineForce ?? 8000.0;
-    this.brakeForce = opts.brakeForce ?? 12000.0;
-    this.eBrakeForce = opts.eBrakeForce ?? (this.brakeForce / 3.5);
+    this.frictionCoeff = opts.frictionCoeff ?? 1.1;        // μ do pneu (atraço)
     this.weightTransfer = opts.weightTransfer ?? 0.2;
     this.maxSteer = opts.maxSteer ?? 0.45;
     this.cornerStiffnessFront = opts.cornerStiffnessFront ?? 5.5;
     this.cornerStiffnessRear = opts.cornerStiffnessRear ?? 3.0;
     this.airResist = opts.airResist ?? 2.5;
-    this.rollResist = opts.rollResist ?? 8.0;
+    this.rollingResistanceCoeff = opts.rollingResistanceCoeff ?? 0.012; // Crr adimensional
 
     // Suspensao
     this.springRate = opts.springRate ?? 35000.0;
@@ -525,11 +524,22 @@ class Car {
     const frictionForceRearZ  = clamp(-c.cornerStiffnessRear * slipAngleRear,
                                       -tireGripRear, tireGripRear) * effectiveRear;
 
-    // 10. Forcas longitudinais (throttle + brake + marcha re) — RWD
-    const brake = Math.min(brakeInput * c.brakeForce + ebrakeInput * c.eBrakeForce, c.brakeForce);
+    // 10. Cargas nos eixos (vindas da suspensao independente)
+    const frontAxleLoad = fl.tireLoad + fr.tireLoad;
+    const rearAxleLoad = rl.tireLoad + rr.tireLoad;
+
+    // Capacidade maxima de freio por eixo: F = μ * N
+    const frontBrakeMax = c.frictionCoeff * frontAxleLoad;
+    const rearBrakeMax = c.frictionCoeff * rearAxleLoad;
+
+    // Distribuicao de freio RWD: 70% frente / 30% tras
+    // E-brake adiciona forca extra na traseira (50% da capacidade traseira)
+    const brakeForceFront = brakeInput * frontBrakeMax * 0.70 + ebrakeInput * frontBrakeMax * 0.10;
+    const brakeForceRear = brakeInput * rearBrakeMax * 0.30 + ebrakeInput * rearBrakeMax * 0.50;
+
+    // Forcas longitudinais (throttle + brake + marcha re) — RWD
     const throttle = throttleInput * c.engineForce;
 
-    // RWD: aceleracao 100% eixo traseiro, freio 70% frente / 30% tras, marcha re 100% tras
     let tractionForceFront = 0;
     let tractionForceRear  = 0;
     const almostStopped = Math.abs(this.velocityLocal.x) <= 1.0;
@@ -538,21 +548,21 @@ class Car {
     if (brakeInput > 0.01 && (almostStopped || this.velocityLocal.x < -0.2)) {
       // Marcha re: apenas eixo traseiro empurra para tras
       tractionForceRear = -brakeInput * c.engineForce * 0.55;
-    } else if (brake > 0.01 && throttle >= 0) {
-      // Freio normal + aceleracao possivel: distribuicao 70/30
-      tractionForceFront = -brake * velSign * 0.70;
-      tractionForceRear  = throttle + (-brake * velSign * 0.30);
+    } else if ((brakeInput > 0.01 || ebrakeInput > 0.01) && throttle >= 0) {
+      // Freio normal + aceleracao possivel: distribuicao por eixo real
+      tractionForceFront = -brakeForceFront * velSign;
+      tractionForceRear = throttle + (-brakeForceRear * velSign);
     } else {
       // So aceleracao (ou neutro) — 100% traseiro
       tractionForceRear = throttle;
     }
     const tractionForceZ = 0;
 
-    // Drag quadratico + rolling resistance
-    const dragForceX = -c.rollResist * this.velocityLocal.x
-                       - c.airResist * this.velocityLocal.x * Math.abs(this.velocityLocal.x);
-    const dragForceZ = -c.rollResist * this.velocityLocal.z
-                       - c.airResist * this.velocityLocal.z * Math.abs(this.velocityLocal.z);
+    // Drag quadratico + rolling resistance (proporcional ao peso)
+    const rollingResistanceX = -c.rollingResistanceCoeff * c.mass * c.gravity * Math.sign(this.velocityLocal.x || 1);
+    const rollingResistanceZ = -c.rollingResistanceCoeff * c.mass * c.gravity * Math.sign(this.velocityLocal.z || 1);
+    const dragForceX = rollingResistanceX - c.airResist * this.velocityLocal.x * Math.abs(this.velocityLocal.x);
+    const dragForceZ = rollingResistanceZ - c.airResist * this.velocityLocal.z * Math.abs(this.velocityLocal.z);
 
     // 11. Total force em coords locais
     const totalForceLocalX = dragForceX + tractionForceFront + tractionForceRear;
