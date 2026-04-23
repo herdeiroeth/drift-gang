@@ -30,7 +30,7 @@ class CarConfig {
     this.tireGrip = opts.tireGrip ?? 2.0;
     this.lockGrip = opts.lockGrip ?? 0.82;
     this.engineForce = opts.engineForce ?? 8000.0;
-    this.frictionCoeff = opts.frictionCoeff ?? 1.1;        // μ do pneu (atraço)
+    this.frictionCoeff = opts.frictionCoeff ?? 2.5;        // μ do pneu (drift/agressivo)
     this.weightTransfer = opts.weightTransfer ?? 0.2;
     this.maxSteer = opts.maxSteer ?? 0.45;
     this.cornerStiffnessFront = opts.cornerStiffnessFront ?? 5.5;
@@ -532,10 +532,10 @@ class Car {
     const frontBrakeMax = c.frictionCoeff * frontAxleLoad;
     const rearBrakeMax = c.frictionCoeff * rearAxleLoad;
 
-    // Distribuicao de freio RWD: 70% frente / 30% tras
-    // E-brake adiciona forca extra na traseira (50% da capacidade traseira)
-    const brakeForceFront = brakeInput * frontBrakeMax * 0.70 + ebrakeInput * frontBrakeMax * 0.10;
-    const brakeForceRear = brakeInput * rearBrakeMax * 0.30 + ebrakeInput * rearBrakeMax * 0.50;
+    // Distribuicao de freio RWD drift: 80% frente / 20% tras
+    // E-brake adiciona forca extra na traseira (60% da capacidade traseira)
+    const brakeForceFront = brakeInput * frontBrakeMax * 0.80 + ebrakeInput * frontBrakeMax * 0.05;
+    const brakeForceRear = brakeInput * rearBrakeMax * 0.20 + ebrakeInput * rearBrakeMax * 0.60;
 
     // Forcas longitudinais (throttle + brake + marcha re) — RWD
     const throttle = throttleInput * c.engineForce;
