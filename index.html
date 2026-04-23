@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drift 3D</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="start-screen" class="overlay">
+    <h1>DRIFT 3D</h1>
+    <p>Press SPACE to Start</p>
+    <div class="controls">
+      <p>W / S — Gas / Brake</p>
+      <p>A / D — Steer</p>
+      <p>Shift — Handbrake</p>
+      <p>Space — Nitro</p>
+      <p>R — Reset</p>
+      <p>C — Camera</p>
+    </div>
+  </div>
+
+  <div id="hud" class="hud hidden">
+    <div class="hud-left">
+      <div class="speed"><span id="speed-val">0</span> <small>KM/H</small></div>
+    </div>
+    <div class="hud-center">
+      <div class="drift-score" id="drift-score">0</div>
+      <div class="combo" id="combo">1x</div>
+    </div>
+    <div class="hud-right">
+      <div class="total-score">SCORE <span id="total-score">0</span></div>
+    </div>
+  </div>
+
+  <canvas id="game-canvas"></canvas>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>
