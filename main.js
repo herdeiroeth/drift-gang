@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PowertrainSystem, Engine, Clutch, Gearbox, Differential, TractionControl, LaunchControl, Turbocharger } from './powertrain.js';
 
 // ============================================================
 // CONFIG ARCADE
@@ -477,18 +478,55 @@ class Car {
     this.steer = 0;
     this.steerAngle = 0;
 
-    this.gear = 2; // 1ª marcha (índice 2 no array)
-    this.rpm = this.cfg.idleRPM;
-    this.shiftTimer = 0;
-    this.isShifting = false;
-    this.targetGear = 2;
-    this.engineInertia = 0.25; // inércia do motor livre
-
+    // === NOVO POWERTRAIN SYSTEM ===
+    // Movemos tudo do powertrain inline para aqui
+    this.gear = 2; // para compatibilidade HUD migração
+    this.rpm = this.cfg.idleRPM; // para compatibilidade
     this.nitroT = 0;
     this.nitroCd = 0;
     this.resetPos = new THREE.Vector3(0, 1.0, 0);
 
     const c = this.cfg;
+    this.powertrain = new PowertrainSystem({
+      engine: {
+        torqueCurve: c.engineTorque.curve || undefined,
+        idleRPM: c.idleRPM,
+        redlineRPM: c.maxRPM,
+        maxRPM: c.maxRPM + 300,
+        inertia: 0.18,
+        frictionPassive: 18.0,
+        revLimitMode: 'hard',
+        canStall: false, // para arcade não frustrante
+      },
+      clutch: {
+        maxTorqueTransfer: 600,
+      },
+      gearbox: {
+        gearRatios: c.gearRatios,
+        shiftTime: 0.3,
+        autoShift: true,
+      },
+      differential: {
+        type: 'welded', // drift default! pode mudar via input
+        finalDrive: c.diffRatio,
+        efficiency: c.transEfficiency,
+      },
+      tractionControl: {
+        mode: 'off', // drift purê por default
+        gain: 6.0,
+      },
+      launchControl: {
+        enabled: true,
+        launchRPM: 4500,
+      },
+      turbo: {
+        maxBoost: 0.8,  // ~0.8 bar = ~12 PSI
+        spoolRate: 2.0,
+      },
+      finalDrive: c.diffRatio,
+      transEfficiency: c.transEfficiency,
+    });
+
     const hw = c.halfWidth;
     const fAxle = c.cgToFrontAxle;
     const rAxle = -c.cgToRearAxle;
@@ -562,6 +600,7 @@ class Car {
     this.rpm = this.cfg.idleRPM;
     this.shiftTimer = 0;
     this.gear = 2;
+    if (this.powertrain) this.powertrain.reset();
     for (const w of this.wheels) {
       w.angularVelocity = 0;
       w.driveTorque = 0;
@@ -656,52 +695,37 @@ class Car {
       rl.steerAngle = 0;
       rr.steerAngle = 0;
 
-      // Lógica de RPM com Embreagem / Shift
-      const avgRearWheelSpeed = (Math.abs(rl.angularVelocity) + Math.abs(rr.angularVelocity)) * 0.5;
-      const gearRatio = this.currentGearRatio();
-      const driveShaftRPM = avgRearWheelSpeed * Math.abs(gearRatio) * c.diffRatio * (60 / (2 * Math.PI));
+      // === NOVO POWERTRAIN UPDATE ===
+      const clutchPedal = ebrakeInput * 0.3; // clutch pede no handbrake ate 30% como ideia inicial
+      // Update powertrain system
+      const ptInputs = {
+        throttle: throttleInput,
+        clutchPedal: clutchPedal,
+        brakeInput: brakeInput,
+        handbrake: ebrakeInput,
+        shiftUp: false,
+        shiftDown: false,
+        speedMS: this.absVel,
+      };
+      const ptResult = this.powertrain.update(sdt, ptInputs, this.wheels);
       
-      let engineTorque = throttleInput > 0.01 ? throttleInput * c.engineTorque(this.rpm) : 0;
-
-      if (this.isShifting || this.gear === 0 || gearRatio === 0) {
-        // Motor desconectado (Neutro ou Trocando de Marcha)
-        // Acelera baseado no torque livre, cai pela fricção interna (simulada)
-        const engineFriction = (this.rpm / c.maxRPM) * 50; 
-        const freeAccel = (engineTorque - engineFriction) / this.engineInertia;
-        this.rpm += freeAccel * sdt * 5; // Fator de escala para rpm
-        
-        // Se soltar acelerador cai pro idle rápido
-        if (throttleInput < 0.01) {
-          this.rpm += (c.idleRPM - this.rpm) * 5.0 * sdt;
-        }
-      } else {
-        // Motor conectado as rodas
-        // Se a roda travar (ex: handbrake), o RPM não pode cair abaixo do Idle
-        let targetRPM = Math.max(driveShaftRPM, c.idleRPM);
-        
-        // Embreagem "puxa" o RPM atual pro RPM da roda
-        this.rpm += (targetRPM - this.rpm) * Math.min(1.0, 15.0 * sdt);
-      }
-
-      // Hard Rev Limiter
-      if (this.rpm > c.maxRPM) {
-        this.rpm = c.maxRPM;
-        engineTorque = 0; // Corta injeção
-      }
-      if (this.rpm < c.idleRPM) this.rpm = c.idleRPM;
-
-      let driveTorquePerWheel = 0;
-      if (!this.isShifting && Math.abs(gearRatio) > 0.01 && this.gear !== 0) {
-        const totalDriveTorque = engineTorque * gearRatio * c.diffRatio * c.transEfficiency;
-        driveTorquePerWheel = totalDriveTorque * 0.5;
-      }
-      
-      rl.driveTorque = driveTorquePerWheel;
-      rr.driveTorque = driveTorquePerWheel;
+      // Aplica torques do powertrain nas rodas traseiras (RWD)
+      rl.driveTorque = ptResult.wheelTorques.rl;
+      rr.driveTorque = ptResult.wheelTorques.rr;
       fl.driveTorque = 0;
       fr.driveTorque = 0;
+      
+      // Ultra power: se tiver nitro + boost, multiply
+      if (this.nitroT > 0) {
+        rl.driveTorque *= CFG.nitroMult;
+        rr.driveTorque *= CFG.nitroMult;
+      }
 
-      // Freios
+      // Sync de RPM/gear do powertrain para compatibilidade HUD
+      this.rpm = ptResult.rpm;
+      this.gear = this.powertrain.gearbox.currentGear;
+      
+      // === FREIOS ===
       const totalBrake = brakeInput * c.brakeTorqueMax;
       const frontBrake = totalBrake * c.brakeBiasFront;
       const rearBrake  = totalBrake * (1.0 - c.brakeBiasFront);
@@ -814,7 +838,7 @@ class Car {
       this.mesh.rotation.set(this.pitch, this.heading, -this.roll);
     }
 
-    return { wheelData, rpm: this.rpm, gear: this.gear };
+    return { wheelData, rpm: this.rpm, gear: this.gear, powertrain: ptResult };
   }
 
   update(dt, input, smoke, skids) {
@@ -823,17 +847,10 @@ class Car {
     let steerRaw = 0;
     if (input.down('KeyA') || input.down('ArrowLeft')) steerRaw += 1;
     if (input.down('KeyD') || input.down('ArrowRight')) steerRaw -= 1;
-    const hb = input.down('ShiftLeft') || input.down('ShiftRight') ? 1 : 0;
+    const hb = (input.down('ShiftLeft') || input.down('ShiftRight')) ? 1 : 0;
+    const clutchPedal = input.down('ControlLeft') || input.down('ControlRight') ? 0.85 : 0;
 
-    if (brk > 0 && this.velocityLocal.x < 1.0) {
-      this.gear = 1; // Reverse
-    } else if (gas > 0 && this.velocityLocal.x > -1.0 && this.gear < 2) {
-      this.gear = 2; // 1st Gear
-    }
-
-    if (input.once('KeyQ')) this.shiftDown();
-    if (input.once('KeyE')) this.shiftUp();
-
+    // Nitro
     if (input.once('Space') && this.nitroCd <= 0) {
       this.nitroT = CFG.nitroDuration;
       this.nitroCd = CFG.nitroCooldown + CFG.nitroDuration;
@@ -848,54 +865,42 @@ class Car {
     let throttleInput = gas * nitroMult;
     let brakeInput = brk;
 
+    // Reverse / forward gear detection via velocity
     if (brk > 0 && this.velocityLocal.x < 1.0) {
-      this.gear = 1; // Reverse
+      this.powertrain.gearbox.setReverse();
       throttleInput = brk;
       brakeInput = 0;
-    } else if (gas > 0 && this.velocityLocal.x > -1.0 && this.gear < 2) {
-      this.gear = 2; // 1st Gear
-    } else if (this.gear === 1 && gas > 0) {
-      // If we're in reverse and press gas, we should brake to stop
+    } else if (gas > 0 && this.velocityLocal.x > -1.0 && this.powertrain.gearbox.currentGear < 2) {
+      this.powertrain.gearbox.shiftUp(); // volta pra 1st
+    } else if (this.powertrain.gearbox.currentGear === 1 && gas > 0) {
+      // Em reverse andando pra frente → freia
       brakeInput = gas;
       throttleInput = 0;
     }
 
-    // Shift logic update
-    if (this.isShifting) {
-      this.shiftTimer -= dt;
-      if (this.shiftTimer <= 0) {
-        this.gear = this.targetGear;
-        this.isShifting = false;
-        this.shiftTimer = 0.5; // Cooldown after shift
-      }
-    } else {
-      // Automatic Gear Shifting Map
-      if (this.shiftTimer > 0) this.shiftTimer -= dt;
-      
-      if (this.gear >= 2 && this.shiftTimer <= 0) {
-        // Shift Map baseada na carga do acelerador (0 a 1)
-        const load = Math.max(0, throttleInput);
-        
-        // Ponto de subir marcha: pé leve = sobe a 4000 rpm, pé fundo = sobe a 7000 rpm
-        const upshiftRPM = 4000 + load * (7000 - 4000);
-        
-        // Ponto de reduzir marcha: pé leve = deixa cair até 2000, pé fundo = reduz logo a 4500 pra ter força
-        const downshiftRPM = 2000 + load * (4500 - 2000);
+    // Manual shift overrides
+    if (input.once('KeyQ')) this.powertrain.gearbox.shiftDown();
+    if (input.once('KeyE')) this.powertrain.gearbox.shiftUp();
 
-        if (this.rpm > upshiftRPM && this.gear < this.cfg.gearRatios.length - 1) {
-          this.shiftUp();
-        } else if (this.rpm < downshiftRPM && this.gear > 2) {
-          this.shiftDown();
-        } else if (hb > 0 && this.rpm < 4000 && this.gear > 2) {
-          // Drift Kickdown: se bater no freio de mão e o RPM cair, reduz marcha pra encher o motor
-          this.shiftDown();
-        }
-      }
+    // TC toggle
+    if (input.once('KeyT')) {
+      const modes = ['off', 'low', 'high'];
+      const curr = this.powertrain.tc.mode;
+      const next = modes[(modes.indexOf(curr) + 1) % modes.length];
+      this.powertrain.setTCMode(next);
+    }
+
+    // Diff type cycle
+    if (input.once('KeyY')) {
+      const diffs = ['open', 'lsd', 'welded'];
+      const curr = this.powertrain.differential.type;
+      const next = diffs[(diffs.indexOf(curr) + 1) % diffs.length];
+      this.powertrain.setDifferentialType(next);
     }
 
     const phys = this.doPhysics(dt, throttleInput, brakeInput, steerRaw, hb);
 
-    // Visual das rodas: steer angle somado ao heading do carro
+    // Visual das rodas
     for (const w of this.wheels) {
       w.mesh.rotation.set(this.pitch, this.heading + w.steerAngle, -this.roll, 'YXZ');
       w.tireMesh.rotation.x += w.angularVelocity * dt;
@@ -934,22 +939,9 @@ class Car {
       rpm: phys.rpm,
       gear: phys.gear,
       wheelData: phys.wheelData,
+      // Novos dados do powertrain para HUD
+      powertrain: phys.powertrain,
     };
-  }
-
-  shiftUp() { 
-    if (this.gear < this.cfg.gearRatios.length - 1 && !this.isShifting) {
-      this.targetGear = this.gear + 1;
-      this.isShifting = true;
-      this.shiftTimer = 0.35; // 350ms shift time
-    } 
-  }
-  shiftDown() { 
-    if (this.gear > 1 && !this.isShifting) {
-      this.targetGear = this.gear - 1;
-      this.isShifting = true;
-      this.shiftTimer = 0.35;
-    }
   }
 }
 
@@ -1139,12 +1131,19 @@ class Game {
     }
     if(this.ui.telem && this.state==='playing') {
       const wd = telem.wheelData;
-      const slipStr = wd ?
-        `FL sa:${(wd[0]?.slipAngle*57.3).toFixed(1)}\u00b0 sr:${(wd[0]?.slipRatio).toFixed(2)}\n` +
-        `FR sa:${(wd[1]?.slipAngle*57.3).toFixed(1)}\u00b0 sr:${(wd[1]?.slipRatio).toFixed(2)}\n` +
-        `RL sa:${(wd[2]?.slipAngle*57.3).toFixed(1)}\u00b0 sr:${(wd[2]?.slipRatio).toFixed(2)}\n` +
-        `RR sa:${(wd[3]?.slipAngle*57.3).toFixed(1)}\u00b0 sr:${(wd[3]?.slipRatio).toFixed(2)}`
+      const pt = telem.powertrain;
+      let slipStr = wd ?
+        `FL sa:${(wd[0]?.slipAngle*57.3).toFixed(1)}° sr:${(wd[0]?.slipRatio).toFixed(2)}\n` +
+        `FR sa:${(wd[1]?.slipAngle*57.3).toFixed(1)}° sr:${(wd[1]?.slipRatio).toFixed(2)}\n` +
+        `RL sa:${(wd[2]?.slipAngle*57.3).toFixed(1)}° sr:${(wd[2]?.slipRatio).toFixed(2)}\n` +
+        `RR sa:${(wd[3]?.slipAngle*57.3).toFixed(1)}° sr:${(wd[3]?.slipRatio).toFixed(2)}\n`
         : '';
+      if (pt) {
+        slipStr += `DIFF:${pt?.gear} TC:${pt?.tcActive ? 'ON' : 'OFF'}\n`;
+        slipStr += `BOOST:${pt?.boostPsi?.toFixed(1)} PSI\n`;
+        slipStr += `LAUNCH:${pt?.launchActive ? '!!' : '--'}\n`;
+        slipStr += `CLUTCH:${pt?.clutchSlip?.toFixed(2)}\n`;
+      }
       this.ui.telem.textContent = slipStr;
     }
     if(telem.isDrifting){
