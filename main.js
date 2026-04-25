@@ -19,7 +19,7 @@ class CarConfig {
   constructor(opts = {}) {
     this.gravity = opts.gravity ?? 9.81;
     this.mass = opts.mass ?? 1300.0;
-    this.inertiaScale = opts.inertiaScale ?? 1.4;
+    this.inertiaScale = opts.inertiaScale ?? 1.8;
     this.halfWidth = opts.halfWidth ?? 0.82;
     this.cgToFrontAxle = opts.cgToFrontAxle ?? 1.35;
     this.cgToRearAxle = opts.cgToRearAxle ?? 1.35;
@@ -30,8 +30,8 @@ class CarConfig {
     this.wheelInertia = 0.5 * this.wheelMass * this.wheelRadius * this.wheelRadius;
 
     this.mu = opts.mu ?? 1.05;
-    this.cornerStiffnessFront = opts.cornerStiffnessFront ?? 5.8;
-    this.cornerStiffnessRear = opts.cornerStiffnessRear ?? 5.2;
+    this.cornerStiffnessFront = opts.cornerStiffnessFront ?? 5.5;
+    this.cornerStiffnessRear = opts.cornerStiffnessRear ?? 3.2;
     this.maxSlipAngle = opts.maxSlipAngle ?? 0.55;
 
     this.idleRPM = opts.idleRPM ?? 900;
@@ -42,13 +42,13 @@ class CarConfig {
 
     this.brakeTorqueMax = opts.brakeTorqueMax ?? 3200.0;
     this.brakeBiasFront = opts.brakeBiasFront ?? 0.62;
-    this.ebrakeTorque = opts.ebrakeTorque ?? 900.0;
+    this.ebrakeTorque = opts.ebrakeTorque ?? 2000.0;
 
     this.maxSteer = opts.maxSteer ?? 0.48;
     this.ackermannFactor = opts.ackermannFactor ?? 0.85;
 
     this.Cdrag = opts.Cdrag ?? 0.40;
-    this.Crr = opts.Crr ?? 12.0;
+    this.Crr = opts.Crr ?? 0.012;
 
     this.springRate = opts.springRate ?? 38000.0;
     this.damperRate = opts.damperRate ?? 2800.0;
@@ -327,15 +327,16 @@ class Wheel {
     this.dbgLine.material.color.set(this.isGrounded ? 0x00ff00 : 0xff0000);
   }
 
-  updateTireForces(vxLocal, vyLocal, dt) {
+  updateTireForces(vxLocal, vyLocal, dt, effectiveInertia = null) {
     if (!this.isGrounded || this.normalLoad <= 0.01) {
       this.slipAngle = 0;
       this.slipRatio = 0;
       this.longitudinalForce = 0;
       this.lateralForce = 0;
       // No ar: roda acelera apenas pelo torque do motor
+      const inertia = effectiveInertia || this.cfg.wheelInertia;
       const netTorque = this.driveTorque - this.brakeTorque * Math.sign(this.angularVelocity || 1);
-      this.angularVelocity += (netTorque / this.cfg.wheelInertia) * dt;
+      this.angularVelocity += (netTorque / inertia) * dt;
       return;
     }
     const c = this.cfg;
@@ -360,35 +361,62 @@ class Wheel {
     }
     this.slipRatio = Math.max(-1.0, Math.min(1.0, this.slipRatio));
 
-    // === FORÇA LATERAL (slip angle) ===
+    // === FORÇA LATERAL E LONGITUDINAL (Pacejka Simplificado + Círculo de Fricção) ===
     const stiffness = this.isFront ? c.cornerStiffnessFront : c.cornerStiffnessRear;
+    
+    // Força Lateral (Curva)
     let F_lat = -stiffness * this.slipAngle * N;
-    const F_lat_max = mu * N;
-    F_lat = Math.max(-F_lat_max, Math.min(F_lat_max, F_lat));
-
-    // === FORÇA LONGITUDINAL (torque limitado por aderência) ===
-    // Força desejada pelo torque aplicado na roda
+    
+    // Força Longitudinal (Aceleração/Frenagem)
     let F_long_desired = this.driveTorque / c.wheelRadius;
-    // Freio adiciona força de oposição
     if (Math.abs(vxLocal) > 0.1 || Math.abs(this.angularVelocity) > 0.1) {
       const brakeForce = this.brakeTorque / c.wheelRadius;
-      const dir = Math.sign(vxLocal || this.angularVelocity || 1);
-      F_long_desired -= brakeForce * dir;
+      F_long_desired -= brakeForce * Math.sign(vxLocal || this.angularVelocity || 1);
     } else if (this.brakeTorque > 0.01) {
-      // Parado com freio: não move
       F_long_desired = 0;
     }
 
-    const F_long_max = mu * N;
-    let F_long = Math.max(-F_long_max, Math.min(F_long_max, F_long_desired));
+    // Limites de Grip do Pneu
+    const gripMax = mu * N;
+    
+    // Círculo de Fricção Suavizado para Drift (Evita perda de força de tração exagerada na traseira)
+    const F_combined = Math.sqrt(F_long_desired*F_long_desired + F_lat*F_lat);
+    let F_long = F_long_desired;
 
-    // === CÍRCULO DE FRICÇÃO COMBINADO ===
-    const F_combined = Math.sqrt(F_long*F_long + F_lat*F_lat);
-    const F_max = mu * N;
-    if (F_combined > F_max && F_combined > 0.001) {
-      const scale = F_max / F_combined;
-      F_long *= scale;
-      F_lat *= scale;
+    if (F_combined > gripMax && F_combined > 0.001) {
+      if (this.isFront) {
+        // Frente: obedece o círculo real (perde frente se destracionar)
+        const scale = gripMax / F_combined;
+        F_long *= scale;
+        F_lat *= scale;
+      } else {
+        // Traseira: Ajuste Arcade/Drift
+        // Prioriza a Força Longitudinal, mas GARANTE que não empurre no sentido oposto (andando de ré na curva)
+        const driftPushMult = 0.55; // Menos empuxo bruto rodando em falso para evitar que o carro "morda" forte de volta
+        
+        let targetLong = Math.max(-gripMax, Math.min(gripMax, F_long_desired));
+        
+        // Se a roda traseira está girando mais rápido que o asfalto (burnout/drift sob potência),
+        // o empuxo nunca deve inverter (não pode empurrar o carro pra trás).
+        if (Math.sign(F_long_desired) === Math.sign(vxLocal)) {
+           targetLong *= driftPushMult;
+        }
+        
+        F_long = targetLong;
+        
+        // O restante do grip que sobrou da aceleração é usado para força lateral
+        // Limitamos severamente a força lateral quando destracionado pra ele continuar derrapando e não "alinhar" num soco só.
+        const gripLeft = Math.max(0, gripMax - Math.abs(F_long));
+        
+        // Reduzimos o grip direcional (Slip ratio alto mata a curva lateral mais drasticamente na traseira)
+        const slipLoss = Math.min(1.0, Math.abs(this.slipRatio) * 1.5); // Quanta aderência lateral "derrete" com o burnout
+        const maxLat = gripLeft * (1.0 - (slipLoss * 0.7)); 
+
+        F_lat = Math.max(-maxLat, Math.min(maxLat, F_lat));
+      }
+    } else {
+      F_lat = Math.max(-gripMax, Math.min(gripMax, F_lat));
+      F_long = Math.max(-gripMax, Math.min(gripMax, F_long));
     }
 
     this.lateralForce = F_lat;
@@ -396,9 +424,10 @@ class Wheel {
 
     // === DINÂMICA ROTACIONAL DA RODA ===
     // A força real no contato gera um torque de reação
+    const inertia = effectiveInertia || c.wheelInertia;
     const reactionTorque = this.longitudinalForce * c.wheelRadius;
     const netTorque = this.driveTorque - this.brakeTorque * Math.sign(this.angularVelocity || 1) - reactionTorque;
-    const angularAccel = netTorque / c.wheelInertia;
+    const angularAccel = netTorque / inertia;
     this.angularVelocity += angularAccel * dt;
     this.angularVelocity *= 0.9995;
   }
@@ -450,6 +479,10 @@ class Car {
 
     this.gear = 2; // 1ª marcha (índice 2 no array)
     this.rpm = this.cfg.idleRPM;
+    this.shiftTimer = 0;
+    this.isShifting = false;
+    this.targetGear = 2;
+    this.engineInertia = 0.25; // inércia do motor livre
 
     this.nitroT = 0;
     this.nitroCd = 0;
@@ -527,6 +560,7 @@ class Car {
     this.rollVel = 0;
     this.nitroT = 0;
     this.rpm = this.cfg.idleRPM;
+    this.shiftTimer = 0;
     this.gear = 2;
     for (const w of this.wheels) {
       w.angularVelocity = 0;
@@ -550,8 +584,8 @@ class Car {
   }
 
   applySafeSteer(steerInput) {
-    const avel = Math.min(this.absVel, 250.0);
-    return steerInput * (1.0 - (avel / 290.0));
+    const avel = Math.min(this.absVel, 100.0);
+    return steerInput * (1.0 - (avel / 120.0));
   }
 
   ackermann(steerInner) {
@@ -604,38 +638,64 @@ class Car {
       // Anti-roll
       const frontRoll = c.antiRollFront * (fl.compression - fr.compression);
       const rearRoll  = c.antiRollRear  * (rl.compression - rr.compression);
-      fl.normalLoad = Math.max(0, fl.suspensionForce - frontRoll * 0.5);
-      fr.normalLoad = Math.max(0, fr.suspensionForce + frontRoll * 0.5);
-      rl.normalLoad = Math.max(0, rl.suspensionForce - rearRoll * 0.5);
-      rr.normalLoad = Math.max(0, rr.suspensionForce + rearRoll * 0.5);
+      // ARB transfers load TO the more compressed wheel (outside wheel)
+      fl.normalLoad = Math.max(0, fl.suspensionForce + frontRoll * 0.5);
+      fr.normalLoad = Math.max(0, fr.suspensionForce - frontRoll * 0.5);
+      rl.normalLoad = Math.max(0, rl.suspensionForce + rearRoll * 0.5);
+      rr.normalLoad = Math.max(0, rr.suspensionForce - rearRoll * 0.5);
 
       // Ackermann
       const rawSteer = this.steer * c.maxSteer;
-      if (this.steer >= 0) {
-        fl.steerAngle = rawSteer;
-        fr.steerAngle = this.ackermann(rawSteer) * c.ackermannFactor;
-      } else {
-        fr.steerAngle = rawSteer;
-        fl.steerAngle = this.ackermann(rawSteer) * c.ackermannFactor;
+      if (this.steer >= 0) { // Turning Right
+        fr.steerAngle = rawSteer; // Right is Inner
+        fl.steerAngle = this.ackermann(rawSteer) * c.ackermannFactor; // Left is Outer
+      } else { // Turning Left
+        fl.steerAngle = rawSteer; // Left is Inner
+        fr.steerAngle = this.ackermann(rawSteer) * c.ackermannFactor; // Right is Outer
       }
       rl.steerAngle = 0;
       rr.steerAngle = 0;
 
-      // RPM e drive torque
+      // Lógica de RPM com Embreagem / Shift
       const avgRearWheelSpeed = (Math.abs(rl.angularVelocity) + Math.abs(rr.angularVelocity)) * 0.5;
-      const driveShaftRPM = avgRearWheelSpeed * Math.abs(this.currentGearRatio()) * c.diffRatio * (60 / (2 * Math.PI));
-      let targetRPM = driveShaftRPM;
-      if (targetRPM < c.idleRPM) targetRPM = c.idleRPM;
-      if (targetRPM > c.maxRPM) targetRPM = c.maxRPM;
-      this.rpm += (targetRPM - this.rpm) * Math.min(1.0, 10.0 * sdt);
-
-      const engineTorque = throttleInput > 0.01 ? throttleInput * c.engineTorque(this.rpm) : 0;
       const gearRatio = this.currentGearRatio();
+      const driveShaftRPM = avgRearWheelSpeed * Math.abs(gearRatio) * c.diffRatio * (60 / (2 * Math.PI));
+      
+      let engineTorque = throttleInput > 0.01 ? throttleInput * c.engineTorque(this.rpm) : 0;
+
+      if (this.isShifting || this.gear === 0 || gearRatio === 0) {
+        // Motor desconectado (Neutro ou Trocando de Marcha)
+        // Acelera baseado no torque livre, cai pela fricção interna (simulada)
+        const engineFriction = (this.rpm / c.maxRPM) * 50; 
+        const freeAccel = (engineTorque - engineFriction) / this.engineInertia;
+        this.rpm += freeAccel * sdt * 5; // Fator de escala para rpm
+        
+        // Se soltar acelerador cai pro idle rápido
+        if (throttleInput < 0.01) {
+          this.rpm += (c.idleRPM - this.rpm) * 5.0 * sdt;
+        }
+      } else {
+        // Motor conectado as rodas
+        // Se a roda travar (ex: handbrake), o RPM não pode cair abaixo do Idle
+        let targetRPM = Math.max(driveShaftRPM, c.idleRPM);
+        
+        // Embreagem "puxa" o RPM atual pro RPM da roda
+        this.rpm += (targetRPM - this.rpm) * Math.min(1.0, 15.0 * sdt);
+      }
+
+      // Hard Rev Limiter
+      if (this.rpm > c.maxRPM) {
+        this.rpm = c.maxRPM;
+        engineTorque = 0; // Corta injeção
+      }
+      if (this.rpm < c.idleRPM) this.rpm = c.idleRPM;
+
       let driveTorquePerWheel = 0;
-      if (Math.abs(gearRatio) > 0.01 && this.gear !== 0) {
+      if (!this.isShifting && Math.abs(gearRatio) > 0.01 && this.gear !== 0) {
         const totalDriveTorque = engineTorque * gearRatio * c.diffRatio * c.transEfficiency;
         driveTorquePerWheel = totalDriveTorque * 0.5;
       }
+      
       rl.driveTorque = driveTorquePerWheel;
       rr.driveTorque = driveTorquePerWheel;
       fl.driveTorque = 0;
@@ -655,12 +715,20 @@ class Car {
       // Velocidade local do ponto de contato
       const getContactVel = (w) => {
         const r = w.mesh.position.clone().sub(this.position);
-        const omegaCrossR = new THREE.Vector3(-this.yawRate * r.z, 0, this.yawRate * r.x);
+        const omegaCrossR = new THREE.Vector3(this.yawRate * r.z, 0, -this.yawRate * r.x);
         const vWorld = this.velocity.clone().add(omegaCrossR);
         const vx = this.forward.dot(vWorld);
         const vy = this.right.dot(vWorld);
         return { vx, vy };
       };
+
+      // Inércia Efetiva (Motor + Rodas) acoplada para rodas traseiras
+      let effectiveRearInertia = c.wheelInertia;
+      if (!this.isShifting && this.gear !== 0 && gearRatio !== 0) {
+        // Multiplica a inércia do motor pela marcha atual ao quadrado
+        // Divide por 2 pois o torque é distribuído para duas rodas traseiras
+        effectiveRearInertia += (this.engineInertia * Math.pow(gearRatio * c.diffRatio, 2)) / 2;
+      }
 
       // Forças de pneu
       let totalFx = 0, totalFz = 0, yawTorque = 0;
@@ -669,7 +737,8 @@ class Car {
       for (let i = 0; i < 4; i++) {
         const w = this.wheels[i];
         const vel = getContactVel(w);
-        w.updateTireForces(vel.vx, vel.vy, sdt);
+        const wInertia = (i >= 2) ? effectiveRearInertia : c.wheelInertia;
+        w.updateTireForces(vel.vx, vel.vy, sdt, wInertia);
 
         // Converter forças da roda (local à roda) para local ao carro
         const cosS = Math.cos(w.steerAngle);
@@ -680,15 +749,14 @@ class Car {
         // Rolling resistance (simples, proporcional à carga)
         const rrDir = Math.sign(vel.vx) || (Math.sign(w.angularVelocity) || 0);
         if (Math.abs(vel.vx) > 0.1) {
-          const Frr = -c.Crr * 0.015 * w.normalLoad * Math.sign(vel.vx);
+          const Frr = -c.Crr * w.normalLoad * Math.sign(vel.vx);
           fx += Frr;
         }
 
         totalFx += fx;
         totalFz += fz;
 
-        const r = w.mesh.position.clone().sub(this.position);
-        yawTorque += fz * r.z - fx * r.x;
+        yawTorque += fz * w.offsetLocal.z - fx * w.offsetLocal.x;
 
         wheelData.push({
           slipAngle: w.slipAngle,
@@ -727,7 +795,7 @@ class Car {
       // Yaw
       const angularAccel = yawTorque / c.inertia;
       this.yawRate += angularAccel * sdt;
-      this.yawRate *= 0.998;
+      this.yawRate *= 0.992;
       this.heading += this.yawRate * sdt;
 
       // Posição
@@ -735,7 +803,7 @@ class Car {
       this.position.z += this.velocity.z * sdt;
 
       // Pitch / roll
-      const targetPitch = this.accelLocal.x * 0.022;
+      const targetPitch = -this.accelLocal.x * 0.022;
       const targetRoll  = -this.accelLocal.z * 0.018;
       this.pitchVel += ((targetPitch - this.pitch) * c.pitchStiff - this.pitchVel * c.pitchDamp) * sdt;
       this.rollVel  += ((targetRoll  - this.roll)  * c.rollStiff  - this.rollVel  * c.rollDamp)  * sdt;
@@ -757,6 +825,12 @@ class Car {
     if (input.down('KeyD') || input.down('ArrowRight')) steerRaw -= 1;
     const hb = input.down('ShiftLeft') || input.down('ShiftRight') ? 1 : 0;
 
+    if (brk > 0 && this.velocityLocal.x < 1.0) {
+      this.gear = 1; // Reverse
+    } else if (gas > 0 && this.velocityLocal.x > -1.0 && this.gear < 2) {
+      this.gear = 2; // 1st Gear
+    }
+
     if (input.once('KeyQ')) this.shiftDown();
     if (input.once('KeyE')) this.shiftUp();
 
@@ -771,8 +845,55 @@ class Car {
     this.steer = this.applySmoothSteer(steerRaw, dt);
     this.steer = this.applySafeSteer(this.steer);
 
-    const throttleInput = gas * nitroMult;
-    const phys = this.doPhysics(dt, throttleInput, brk, steerRaw, hb);
+    let throttleInput = gas * nitroMult;
+    let brakeInput = brk;
+
+    if (brk > 0 && this.velocityLocal.x < 1.0) {
+      this.gear = 1; // Reverse
+      throttleInput = brk;
+      brakeInput = 0;
+    } else if (gas > 0 && this.velocityLocal.x > -1.0 && this.gear < 2) {
+      this.gear = 2; // 1st Gear
+    } else if (this.gear === 1 && gas > 0) {
+      // If we're in reverse and press gas, we should brake to stop
+      brakeInput = gas;
+      throttleInput = 0;
+    }
+
+    // Shift logic update
+    if (this.isShifting) {
+      this.shiftTimer -= dt;
+      if (this.shiftTimer <= 0) {
+        this.gear = this.targetGear;
+        this.isShifting = false;
+        this.shiftTimer = 0.5; // Cooldown after shift
+      }
+    } else {
+      // Automatic Gear Shifting Map
+      if (this.shiftTimer > 0) this.shiftTimer -= dt;
+      
+      if (this.gear >= 2 && this.shiftTimer <= 0) {
+        // Shift Map baseada na carga do acelerador (0 a 1)
+        const load = Math.max(0, throttleInput);
+        
+        // Ponto de subir marcha: pé leve = sobe a 4000 rpm, pé fundo = sobe a 7000 rpm
+        const upshiftRPM = 4000 + load * (7000 - 4000);
+        
+        // Ponto de reduzir marcha: pé leve = deixa cair até 2000, pé fundo = reduz logo a 4500 pra ter força
+        const downshiftRPM = 2000 + load * (4500 - 2000);
+
+        if (this.rpm > upshiftRPM && this.gear < this.cfg.gearRatios.length - 1) {
+          this.shiftUp();
+        } else if (this.rpm < downshiftRPM && this.gear > 2) {
+          this.shiftDown();
+        } else if (hb > 0 && this.rpm < 4000 && this.gear > 2) {
+          // Drift Kickdown: se bater no freio de mão e o RPM cair, reduz marcha pra encher o motor
+          this.shiftDown();
+        }
+      }
+    }
+
+    const phys = this.doPhysics(dt, throttleInput, brakeInput, steerRaw, hb);
 
     // Visual das rodas: steer angle somado ao heading do carro
     for (const w of this.wheels) {
@@ -802,16 +923,6 @@ class Car {
       [0,1,2,3].forEach(i => skids.clear(i));
     }
 
-    const limit = CFG.arenaSize + 2;
-    if (Math.abs(this.position.x) > limit) {
-      this.position.x = Math.sign(this.position.x) * limit;
-      this.velocity.x *= -0.3;
-    }
-    if (Math.abs(this.position.z) > limit) {
-      this.position.z = Math.sign(this.position.z) * limit;
-      this.velocity.z *= -0.3;
-    }
-
     return {
       speed: this.absVel,
       forwardSpeed: this.velocityLocal.x,
@@ -826,8 +937,20 @@ class Car {
     };
   }
 
-  shiftUp() { if (this.gear < this.cfg.gearRatios.length - 1) this.gear++; }
-  shiftDown() { if (this.gear > 1) this.gear--; }
+  shiftUp() { 
+    if (this.gear < this.cfg.gearRatios.length - 1 && !this.isShifting) {
+      this.targetGear = this.gear + 1;
+      this.isShifting = true;
+      this.shiftTimer = 0.35; // 350ms shift time
+    } 
+  }
+  shiftDown() { 
+    if (this.gear > 1 && !this.isShifting) {
+      this.targetGear = this.gear - 1;
+      this.isShifting = true;
+      this.shiftTimer = 0.35;
+    }
+  }
 }
 
 // ============================================================
@@ -885,7 +1008,7 @@ function createAsphaltTexture() {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(20, 20);
+  tex.repeat.set(40, 40);
   return tex;
 }
 
@@ -894,46 +1017,13 @@ function buildArena(scene){
   const floorMat = new THREE.MeshStandardMaterial({
     map: asphaltTex, roughness: 0.92, metalness: 0.05, color: 0x888888
   });
-  const floor=new THREE.Mesh(new THREE.PlaneGeometry(180,180), floorMat);
+  const floor=new THREE.Mesh(new THREE.PlaneGeometry(360,360), floorMat);
   floor.rotation.x=-Math.PI/2; floor.receiveShadow=true; scene.add(floor);
 
-  const grid=new THREE.GridHelper(180,90,0xff2a6d,0x555566);
+  const grid=new THREE.GridHelper(360,180,0xff2a6d,0x555566);
   grid.position.y=0.03; scene.add(grid);
 
-  const bmat=new THREE.MeshStandardMaterial({color:0xff3333,roughness:0.5});
-  const b1=new THREE.Mesh(new THREE.BoxGeometry(180,1.6,1.4),bmat); b1.position.set(0,0.8,90); scene.add(b1);
-  const b2=new THREE.Mesh(new THREE.BoxGeometry(180,1.6,1.4),bmat); b2.position.set(0,0.8,-90); scene.add(b2);
-  const b3=new THREE.Mesh(new THREE.BoxGeometry(1.4,1.6,180),bmat); b3.position.set(90,0.8,0); scene.add(b3);
-  const b4=new THREE.Mesh(new THREE.BoxGeometry(1.4,1.6,180),bmat); b4.position.set(-90,0.8,0); scene.add(b4);
-
-  const coneGeo=new THREE.ConeGeometry(0.4,1.0,8);
-  const coneMat=new THREE.MeshStandardMaterial({color:0xffaa00});
-  for(let i=0;i<50;i++){
-    const c=new THREE.Mesh(coneGeo,coneMat);
-    c.position.set((Math.random()-.5)*160,0.5,(Math.random()-.5)*160);
-    c.castShadow=true; scene.add(c);
-  }
-
-  const boxMat=new THREE.MeshStandardMaterial({color:0x00d4aa});
-  for(let i=0;i<12;i++){
-    const b=new THREE.Mesh(new THREE.BoxGeometry(1.5+Math.random()*2.5,1.5+Math.random()*2.5,1.5+Math.random()*2.5), boxMat);
-    b.position.set((Math.random()-.5)*100, 1, (Math.random()-.5)*100);
-    b.castShadow=true; scene.add(b);
-  }
-
-  const rampMat = new THREE.MeshStandardMaterial({ color:0x8844ff });
-  const ramps = [];
-  for(let i=0;i<4;i++){
-    const ramp = new THREE.Mesh(new THREE.BoxGeometry(3.5,0.3,7), rampMat);
-    ramp.position.set((Math.random()-.5)*70, 0.3, (Math.random()-.5)*70);
-    ramp.rotation.z = (Math.random()-.5)*0.3;
-    ramp.rotation.x = -0.15;
-    ramp.receiveShadow = true;
-    scene.add(ramp);
-    ramps.push(ramp);
-  }
-
-  return [floor, ...ramps];
+  return { groundObjects: [floor], floor, grid };
 }
 
 // ============================================================
@@ -967,8 +1057,10 @@ class Game {
     this.skids=new SkidSystem(this.scene);
 
     setupEnv(this.scene);
-    this.groundObjects = buildArena(this.scene);
-    this.car=new Car(this.scene, this.groundObjects);
+    const arena = buildArena(this.scene);
+    this.groundObjects = arena.groundObjects;
+    this.arena = arena;
+    this.car = new Car(this.scene, this.groundObjects);
     this.camCtrl=new CamCtrl(this.camera);
 
     this.setupLights();
@@ -988,9 +1080,9 @@ class Game {
     dir.position.set(40,80,30);
     dir.castShadow=true;
     dir.shadow.mapSize.set(2048,2048);
-    dir.shadow.camera.near=0.5; dir.shadow.camera.far=200;
-    dir.shadow.camera.left=-100; dir.shadow.camera.right=100;
-    dir.shadow.camera.top=100; dir.shadow.camera.bottom=-100;
+    dir.shadow.camera.near=0.5; dir.shadow.camera.far=400;
+    dir.shadow.camera.left=-200; dir.shadow.camera.right=200;
+    dir.shadow.camera.top=200; dir.shadow.camera.bottom=-200;
     this.scene.add(dir);
   }
   bindUI(){
@@ -1094,6 +1186,29 @@ class Game {
     const telem=this.car.update(dt,this.input,this.smoke,this.skids);
     this.smoke.update(dt);
     this.skids.update();
+
+    // Infinite ground update
+    const arena = this.arena;
+    if (arena) {
+      const carX = this.car.position.x;
+      const carZ = this.car.position.z;
+      const floor = arena.floor;
+      const grid = arena.grid;
+      const halfSize = 180;
+      if (Math.abs(carX - floor.position.x) > halfSize) {
+        floor.position.x += Math.round((carX - floor.position.x) / halfSize) * halfSize;
+        if (grid) grid.position.x = floor.position.x;
+      }
+      if (Math.abs(carZ - floor.position.z) > halfSize) {
+        floor.position.z += Math.round((carZ - floor.position.z) / halfSize) * halfSize;
+        if (grid) grid.position.z = floor.position.z;
+      }
+      if (floor.material && floor.material.map) {
+        floor.material.map.offset.x = floor.position.x / halfSize;
+        floor.material.map.offset.y = floor.position.z / halfSize;
+      }
+    }
+
     this.camCtrl.update(dt,this.car.position,this.car.heading,telem.speed);
     this.updateHUD(telem,dt);
     this.renderer.render(this.scene,this.camera);
