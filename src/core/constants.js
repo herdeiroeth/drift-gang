@@ -12,14 +12,14 @@ export const PHYSICS_CFG = {
   subSteps: 4,
 
   // Damping de yawRate por sub-step (compensa drift numérico do Euler)
-  yawRateDamping: 0.992,
+  yawRateDamping: 0.998,
 
   // Damping da angularVelocity da roda quando solta no ar (sem grip)
   wheelAirDamping: 0.9995,
 
   // Steer smoothing
-  steerInputAccel: 2.8,
-  steerCenterReturn: 2.0,
+  steerInputAccel: 9.0,
+  steerCenterReturn: 6.0,
 
   // Pitch/roll dinâmico do chassis (visual feedback de aceleração e curva)
   pitchAccelGain: 0.022,

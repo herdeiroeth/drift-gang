@@ -55,6 +55,21 @@ export const DEFAULT_PACEJKA_LATERAL = {
   E: 0.97,   // curvature factor (próximo de 1 = peak suave)
 };
 
+// Rear-axle Pacejka lateral tunado pra DRIFT:
+//   - B menor (8 vs 10): peak mais "raso" — menos pico afiado, slip angle de
+//     pico um pouco maior (~7.5°) → mais janela de controle no slide.
+//   - C maior (1.4 vs 1.3): shape factor alto reforça o "shelf" pós-peak,
+//     deixando a curva cair menos depois do break-away → drift sustentável.
+//   - E menor (0.92 vs 0.97): curvatura mais agressiva no falloff, mas
+//     combinado com C alto resulta num platô amigável a slip angles altos.
+// Resumo: rear segura mais a saída do peak, melhora controlabilidade
+// em oversteer power-on típico de drift.
+export const REAR_PACEJKA_LATERAL = {
+  B: 8.0,
+  C: 1.4,
+  E: 0.92,
+};
+
 export const DEFAULT_PACEJKA_LONGITUDINAL = {
   B: 10.0,
   C: 1.65,
@@ -146,8 +161,17 @@ export function pacejkaLongitudinal(slipRatio, mu, N, params = {}) {
 export function combinedSlipForces(slipAngle, slipRatio, mu, N, params = {}) {
   if (N <= 0) return { Fx: 0, Fy: 0 };
 
+  // Auto-routing dos params de Pacejka lateral por eixo:
+  //   - se o caller já mandou params.lateral explícito, respeita.
+  //   - senão, rear usa REAR_PACEJKA_LATERAL (curva drift-friendly),
+  //     front usa DEFAULT_PACEJKA_LATERAL (turn-in afiado).
+  // Isso evita ter que rotear params diferentes lá em Wheel.js — a distinção
+  // por eixo já vive no modelo de pneu.
+  const lateralParams = params.lateral
+    ?? (params.isRear ? REAR_PACEJKA_LATERAL : DEFAULT_PACEJKA_LATERAL);
+
   const Fx0 = pacejkaLongitudinal(slipRatio, mu, N, params.longitudinal);
-  const Fy0 = pacejkaLateral(slipAngle, mu, N, params.lateral);
+  const Fy0 = pacejkaLateral(slipAngle, mu, N, lateralParams);
 
   // razão combinada (envelope elíptico em α-κ space)
   const aNorm = slipAngle / ALPHA_PEAK;
@@ -171,7 +195,9 @@ export function combinedSlipForces(slipAngle, slipRatio, mu, N, params = {}) {
   // viés de drift no rear: redistribui parte do envelope pro longitudinal
   // quando há slip ratio significativo na direção do movimento (power-on)
   if (params.isRear && Math.abs(slipRatio) > KAPPA_PEAK) {
-    const driftBias = params.driftBias ?? 0.4;
+    // 0.5 (era 0.4): mais "throttle steer" feel — preserva mais força
+    // longitudinal sob oversteer power-on, sustenta o slide melhor.
+    const driftBias = params.driftBias ?? 0.5;
     // sob power-on (κ alto), preserva longitudinal e atenua lateral
     const longBoost = 1.0 + driftBias * Math.min(1.0, (Math.abs(slipRatio) - KAPPA_PEAK) / KAPPA_PEAK);
     const latLoss = 1.0 - driftBias * Math.min(1.0, (Math.abs(slipRatio) - KAPPA_PEAK) / KAPPA_PEAK);
@@ -208,7 +234,8 @@ export class Tire {
       E: opts.longE ?? DEFAULT_PACEJKA_LONGITUDINAL.E,
     };
     this.isRear = opts.isRear ?? false;
-    this.driftBias = opts.driftBias ?? 0.4;
+    // 0.5 (era 0.4): default mais drift-friendly — alinha com combinedSlipForces.
+    this.driftBias = opts.driftBias ?? 0.5;
   }
 
   computeForces(slipAngle, slipRatio, N, muOverride = null) {

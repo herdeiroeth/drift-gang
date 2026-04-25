@@ -175,19 +175,31 @@ export class Car {
   }
 
   applySmoothSteer(steerInput, dt) {
+    const STEER_SPEED = PHYSICS_CFG.steerInputAccel;
+    const RETURN_SPEED = PHYSICS_CFG.steerCenterReturn;
     if (Math.abs(steerInput) > 0.001) {
-      const s = this.steer + steerInput * dt * PHYSICS_CFG.steerInputAccel;
-      return Math.max(-1.0, Math.min(1.0, s));
-    } else {
-      if (this.steer > 0) return Math.max(this.steer - dt * PHYSICS_CFG.steerCenterReturn, 0);
-      if (this.steer < 0) return Math.min(this.steer + dt * PHYSICS_CFG.steerCenterReturn, 0);
-      return 0;
+      const t = 1.0 - Math.exp(-STEER_SPEED * dt);
+      return Math.max(-1.0, Math.min(1.0, this.steer + (steerInput - this.steer) * t));
     }
+    const t = 1.0 - Math.exp(-RETURN_SPEED * dt);
+    return this.steer * (1.0 - t);
   }
 
   applySafeSteer(steerInput) {
-    const avel = Math.min(this.absVel, PHYSICS_CFG.safeSteerCap);
-    return steerInput * (1.0 - (avel / PHYSICS_CFG.safeSteerMaxSpeed));
+    const speedRatio = Math.min(1.0, this.absVel / 55.0);
+    const reduction = 0.45 * speedRatio * speedRatio;
+    return steerInput * (1.0 - reduction);
+  }
+
+  applySelfAligningTorque(dt) {
+    const fl = this.wheels[0];
+    const fr = this.wheels[1];
+    if (!fl || !fr) return;
+    const avgFrontSlip = (fl.slipAngle + fr.slipAngle) * 0.5;
+    const speedFactor = Math.min(1.0, this.absVel / 20.0);
+    const SAT_STRENGTH = 0.6;
+    const correction = -avgFrontSlip * speedFactor * SAT_STRENGTH * dt;
+    this.steer = Math.max(-1.0, Math.min(1.0, this.steer + correction));
   }
 
   ackermann(steerInner) {
@@ -206,6 +218,8 @@ export class Car {
     const sdt = dt / steps;
     const c = this.cfg;
     let wheelData = [];
+
+    this.applySelfAligningTorque(dt);
 
     let ptResult = null;
     for (let step = 0; step < steps; step++) {
@@ -443,9 +457,7 @@ export class Car {
   update(dt, input, smoke, skids) {
     const gas = (input.down('KeyW') || input.down('ArrowUp')) ? 1 : 0;
     const brk = (input.down('KeyS') || input.down('ArrowDown')) ? 1 : 0;
-    let steerRaw = 0;
-    if (input.down('KeyA') || input.down('ArrowLeft')) steerRaw += 1;
-    if (input.down('KeyD') || input.down('ArrowRight')) steerRaw -= 1;
+    let steerRaw = input.steeringAxis();
     const hb = (input.down('ShiftLeft') || input.down('ShiftRight')) ? 1 : 0;
 
     if (input.once('Space') && this.nitroCd <= 0) {

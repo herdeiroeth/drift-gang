@@ -8,6 +8,7 @@ import { SmokeSystem } from '../rendering/particles/SmokeSystem.js';
 import { SkidSystem } from '../rendering/particles/SkidSystem.js';
 import { HUDManager } from '../hud/HUDManager.js';
 import { TuningUI } from '../tuning/TuningUI.js';
+import { Telemetry } from '../ui/Telemetry.js';
 
 export class Game {
   constructor() {
@@ -38,6 +39,8 @@ export class Game {
 
     this.tuning = new TuningUI(this.car);
     this.tuning.bind();
+
+    this.telemetry = new Telemetry();
 
     this.state = 'start';
 
@@ -81,9 +84,11 @@ export class Game {
         this.hud.resetScore();
       }
       if (this.input.once('KeyK')) this.tuning.toggle();
+      if (this.input.once('KeyH')) this.telemetry.toggle();
       this.tuning.update();
 
       const telem = this.car.update(dt, this.input, this.smoke, this.skids);
+      this.telemetry.update(this.car);
       this.smoke.update(dt);
       this.skids.update();
 

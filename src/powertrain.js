@@ -508,7 +508,9 @@ const WELDED_DAMPING_K = 50000;  // N·m·s/rad — forte, mas estável
 export class Differential {
   constructor(opts = {}) {
     // Aliases para compat com nomes antigos
-    let type = opts.type ?? 'open';
+    // Default mudou: 'open' → 'lsd_clutch' (Salisbury). Drift precisa de lockup;
+    // open diff perde a roda interna e entrega torque pra zero. LSD trava parcial.
+    let type = opts.type ?? 'lsd_clutch';
     if (type === 'lsd') type = 'lsd_clutch';
     this.type = type;  // 'open'|'welded'|'lsd_clutch'|'torsen'
 
@@ -516,9 +518,16 @@ export class Differential {
     this.efficiency = opts.efficiency ?? 0.85;
 
     // ---- Salisbury / clutch-pack (lsd_clutch)
-    this.preload   = opts.preload   ?? opts.lsdPreload ?? 50;     // Nm sempre aplicado
-    this.powerLock = opts.powerLock ?? 0.4;   // 0=open, 1=spool — sob aceleração
-    this.coastLock = opts.coastLock ?? 0.15;  // 0=open, 1=spool — em coast/motor freio
+    // Defaults TUNADOS PRA DRIFT (eram 50 / 0.4 / 0.15):
+    //   - preload 100 Nm: sempre tem alguma carga estática nos discos —
+    //     elimina o "neutral patch" no centro, resposta mais previsível.
+    //   - powerLock 0.65: ~65% de lockup sob aceleração — motor empurra as
+    //     duas rodas ao mesmo tempo, slide sustentável power-on.
+    //   - coastLock 0.45: ~45% sob desaceleração — ajuda a desestabilizar
+    //     a traseira no lift-off (entry to drift) e mantém a linha em coast.
+    this.preload   = opts.preload   ?? opts.lsdPreload ?? 100;    // Nm sempre aplicado
+    this.powerLock = opts.powerLock ?? 0.65;  // 0=open, 1=spool — sob aceleração
+    this.coastLock = opts.coastLock ?? 0.45;  // 0=open, 1=spool — em coast/motor freio
 
     // ---- Torsen
     this.torsenTBR = opts.torsenTBR ?? 3.0;   // street: 2.5-3.5

@@ -27,7 +27,7 @@ export class CarConfig {
     this.brakeBiasFront = opts.brakeBiasFront ?? 0.62;
     this.ebrakeTorque = opts.ebrakeTorque ?? 2000.0;
 
-    this.maxSteer = opts.maxSteer ?? 0.48;
+    this.maxSteer = opts.maxSteer ?? 0.70;
     this.ackermannFactor = opts.ackermannFactor ?? 0.85;
 
     this.Cdrag = opts.Cdrag ?? 0.40;
