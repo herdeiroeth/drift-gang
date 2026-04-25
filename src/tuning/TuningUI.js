@@ -1,0 +1,611 @@
+/**
+ * TuningUI — overlay estilo Forza/ForzaTune
+ *
+ * Painel modal aberto com tecla K que permite ajustar em tempo real
+ * gear ratios, final drive, parâmetros do diferencial, TC, brake bias,
+ * inércia do motor e boost máximo do turbo.
+ *
+ * Toda mutação é aplicada diretamente em `car.cfg`, `car.powertrain.*`
+ * — a próxima chamada de `powertrain.update()` já vê os novos valores.
+ *
+ * Carrega presets de `src/tuning/presets/*.json` via import dinâmico
+ * (Vite resolve os assets JSON).
+ */
+
+import drift_beginner from './presets/drift_beginner.json';
+import drift_pro from './presets/drift_pro.json';
+import track from './presets/track.json';
+import burnout from './presets/burnout.json';
+
+const PRESETS = {
+  drift_beginner,
+  drift_pro,
+  track,
+  burnout,
+};
+
+const STORAGE_KEY = 'drift-game:tuning:current';
+
+const DIFF_TYPES = [
+  { value: 'open',       label: 'Open' },
+  { value: 'lsd_clutch', label: 'LSD Clutch-Pack' },
+  { value: 'welded',     label: 'Welded' },
+  { value: 'torsen',     label: 'Torsen' },
+];
+
+const TC_MODES = [
+  { value: 'off',  label: 'Off' },
+  { value: 'low',  label: 'Low' },
+  { value: 'high', label: 'High' },
+];
+
+export class TuningUI {
+  constructor(car) {
+    this.car = car;
+    this.visible = false;
+    this.root = null;
+    this.controls = {};
+
+    // snapshot dos defaults pra Reset
+    this.defaults = this._snapshot();
+  }
+
+  // ------------------------------------------------------------------
+  // Build / bind
+  // ------------------------------------------------------------------
+  bind() {
+    if (this.root) return;
+    this._injectStyles();
+    this._buildPanel();
+    this._wireEvents();
+    this._syncFromCar();
+  }
+
+  toggle() {
+    if (!this.root) this.bind();
+    this.visible = !this.visible;
+    this.root.style.display = this.visible ? 'flex' : 'none';
+    if (this.visible) this._syncFromCar();
+  }
+
+  // Re-sync UI valores do estado real do carro (caso mudou via tecla T/Y etc).
+  update() {
+    if (!this.visible) return;
+    this._syncFromCar();
+  }
+
+  // ------------------------------------------------------------------
+  // Styles
+  // ------------------------------------------------------------------
+  _injectStyles() {
+    if (document.getElementById('tuning-ui-styles')) return;
+    const css = `
+      #tuning-panel {
+        position: fixed; top: 0; right: 0; bottom: 0;
+        width: 460px; max-width: 95vw;
+        background: #0a0a0fee;
+        border-left: 2px solid #ff2a6d;
+        box-shadow: -4px 0 24px rgba(255, 42, 109, 0.25);
+        color: #e5e7eb;
+        font-family: 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+        font-size: 12px;
+        z-index: 9999;
+        display: none;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      #tuning-panel .tuning-header {
+        padding: 14px 18px;
+        border-bottom: 1px solid #ff2a6d44;
+        display: flex; align-items: center; justify-content: space-between;
+        background: linear-gradient(90deg, #ff2a6d22, transparent);
+      }
+      #tuning-panel .tuning-title {
+        color: #ff2a6d;
+        font-size: 14px; font-weight: 700; letter-spacing: 0.2em;
+      }
+      #tuning-panel .tuning-close {
+        cursor: pointer; color: #ff2a6d; font-size: 18px;
+        background: transparent; border: none; padding: 0 6px;
+      }
+      #tuning-panel .tuning-actions {
+        display: flex; flex-wrap: wrap; gap: 6px;
+        padding: 10px 14px;
+        border-bottom: 1px solid #ff2a6d22;
+      }
+      #tuning-panel .tuning-presets {
+        display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px;
+        padding: 8px 14px 12px;
+        border-bottom: 1px solid #ff2a6d22;
+      }
+      #tuning-panel .tuning-button,
+      #tuning-panel .tuning-preset {
+        padding: 6px 10px;
+        background: #1a1a22;
+        border: 1px solid #ff2a6d66;
+        color: #e5e7eb;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        transition: background 0.12s, border-color 0.12s;
+      }
+      #tuning-panel .tuning-button:hover,
+      #tuning-panel .tuning-preset:hover {
+        background: #2a1a26;
+        border-color: #ff2a6d;
+      }
+      #tuning-panel .tuning-preset {
+        background: #14141c;
+        color: #ff8fbc;
+      }
+      #tuning-panel .tuning-body {
+        flex: 1; overflow-y: auto;
+        padding: 8px 14px 24px;
+      }
+      #tuning-panel .tuning-section {
+        margin: 14px 0 6px;
+        color: #ff2a6d;
+        font-size: 10px;
+        letter-spacing: 0.25em;
+        text-transform: uppercase;
+        border-bottom: 1px dashed #ff2a6d44;
+        padding-bottom: 4px;
+      }
+      #tuning-panel .tuning-row {
+        display: grid; grid-template-columns: 1fr auto; gap: 4px 12px;
+        align-items: center;
+        margin: 8px 0;
+      }
+      #tuning-panel .tuning-row .tuning-label {
+        font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: #c5c8d4;
+      }
+      #tuning-panel .tuning-row .tuning-value {
+        font-size: 12px; color: #ff2a6d; font-weight: 700;
+        min-width: 56px; text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      #tuning-panel .tuning-slider {
+        grid-column: 1 / -1;
+        -webkit-appearance: none; appearance: none;
+        width: 100%; height: 4px;
+        background: #000;
+        border: 1px solid #ff2a6d44;
+        border-radius: 2px;
+        outline: none;
+      }
+      #tuning-panel .tuning-slider::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none;
+        width: 14px; height: 14px; border-radius: 50%;
+        background: #ff2a6d;
+        border: 1px solid #fff;
+        cursor: pointer;
+        box-shadow: 0 0 8px #ff2a6d99;
+      }
+      #tuning-panel .tuning-slider::-moz-range-thumb {
+        width: 14px; height: 14px; border-radius: 50%;
+        background: #ff2a6d;
+        border: 1px solid #fff;
+        cursor: pointer;
+        box-shadow: 0 0 8px #ff2a6d99;
+      }
+      #tuning-panel select.tuning-select {
+        grid-column: 1 / -1;
+        background: #000;
+        color: #ff2a6d;
+        border: 1px solid #ff2a6d66;
+        padding: 4px 8px;
+        font-family: inherit;
+        font-size: 11px;
+        text-transform: uppercase;
+        outline: none;
+      }
+      #tuning-panel .tuning-hint {
+        font-size: 10px; color: #6b6f80; padding: 6px 14px;
+        text-align: center; letter-spacing: 0.15em;
+      }
+    `;
+    const style = document.createElement('style');
+    style.id = 'tuning-ui-styles';
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+
+  // ------------------------------------------------------------------
+  // DOM build
+  // ------------------------------------------------------------------
+  _buildPanel() {
+    const root = document.createElement('div');
+    root.id = 'tuning-panel';
+
+    // header
+    const header = document.createElement('div');
+    header.className = 'tuning-header';
+    const title = document.createElement('div');
+    title.className = 'tuning-title';
+    title.textContent = 'TUNING ▸ FORZA MODE';
+    const close = document.createElement('button');
+    close.className = 'tuning-close';
+    close.textContent = '×';
+    close.addEventListener('click', () => this.toggle());
+    header.appendChild(title);
+    header.appendChild(close);
+    root.appendChild(header);
+
+    // actions
+    const actions = document.createElement('div');
+    actions.className = 'tuning-actions';
+    actions.appendChild(this._mkButton('Save Setup',    () => this.saveSetup()));
+    actions.appendChild(this._mkButton('Load Setup',    () => this.loadSetup()));
+    actions.appendChild(this._mkButton('Reset Default', () => this.resetDefault()));
+    root.appendChild(actions);
+
+    // presets
+    const presets = document.createElement('div');
+    presets.className = 'tuning-presets';
+    presets.appendChild(this._mkPreset('Drift Beginner', 'drift_beginner'));
+    presets.appendChild(this._mkPreset('Drift Pro',      'drift_pro'));
+    presets.appendChild(this._mkPreset('Track',          'track'));
+    presets.appendChild(this._mkPreset('Burnout',        'burnout'));
+    root.appendChild(presets);
+
+    // body
+    const body = document.createElement('div');
+    body.className = 'tuning-body';
+
+    body.appendChild(this._mkSection('Drivetrain'));
+    this._mkSlider(body, 'finalDrive', 'Final Drive', 1.5, 6.0, 0.05, 2,
+      v => {
+        this.car.cfg.diffRatio = v;
+        if (this.car.powertrain) {
+          this.car.powertrain.finalDrive = v;
+          if (this.car.powertrain.differential) this.car.powertrain.differential.finalDrive = v;
+        }
+      });
+
+    body.appendChild(this._mkSection('Gear Ratios'));
+    for (let g = 1; g <= 6; g++) {
+      const idx = g + 1; // index em gearRatios array (0=N, 1=R, 2..7=1ª..6ª)
+      this._mkSlider(body, `gear${g}`, `${g}ª Gear`, 0.4, 4.5, 0.05, 2,
+        v => {
+          if (this.car.powertrain?.gearbox?.gearRatios) {
+            this.car.powertrain.gearbox.gearRatios[idx] = v;
+          }
+          if (this.car.cfg?.gearRatios) {
+            this.car.cfg.gearRatios[idx] = v;
+          }
+        });
+    }
+
+    body.appendChild(this._mkSection('Differential'));
+    this._mkSelect(body, 'diffType', 'Differential Type', DIFF_TYPES,
+      v => {
+        if (this.car.powertrain?.differential) this.car.powertrain.differential.type = v;
+      });
+    this._mkSlider(body, 'powerLock', 'Diff Power Lock %', 0, 100, 5, 0,
+      v => {
+        if (this.car.powertrain?.differential) this.car.powertrain.differential.powerLock = v / 100;
+      });
+    this._mkSlider(body, 'coastLock', 'Diff Coast Lock %', 0, 100, 5, 0,
+      v => {
+        if (this.car.powertrain?.differential) this.car.powertrain.differential.coastLock = v / 100;
+      });
+    this._mkSlider(body, 'preload', 'Diff Preload (Nm)', 0, 200, 5, 0,
+      v => {
+        if (this.car.powertrain?.differential) this.car.powertrain.differential.preload = v;
+      });
+
+    body.appendChild(this._mkSection('Assists & Brakes'));
+    this._mkSelect(body, 'tcMode', 'TC Mode', TC_MODES,
+      v => {
+        if (this.car.powertrain?.setTCMode) this.car.powertrain.setTCMode(v);
+        else if (this.car.powertrain?.tc) this.car.powertrain.tc.mode = v;
+      });
+    this._mkSlider(body, 'brakeBiasFront', 'Brake Bias Front %', 40, 80, 1, 0,
+      v => { this.car.cfg.brakeBiasFront = v / 100; });
+
+    body.appendChild(this._mkSection('Engine & Turbo'));
+    this._mkSlider(body, 'engineInertia', 'Engine Inertia (kg·m²)', 0.10, 0.40, 0.01, 2,
+      v => {
+        if (this.car.powertrain?.engine) this.car.powertrain.engine.inertia = v;
+      });
+    this._mkSlider(body, 'turboMaxBoost', 'Turbo Max Boost (bar)', 0, 2.5, 0.05, 2,
+      v => {
+        if (this.car.powertrain?.turbo) this.car.powertrain.turbo.maxBoost = v;
+      });
+
+    root.appendChild(body);
+
+    // hint
+    const hint = document.createElement('div');
+    hint.className = 'tuning-hint';
+    hint.textContent = 'PRESS K TO CLOSE';
+    root.appendChild(hint);
+
+    document.body.appendChild(root);
+    this.root = root;
+  }
+
+  // ------------------------------------------------------------------
+  // Event wiring
+  // ------------------------------------------------------------------
+  _wireEvents() {
+    // ESC fecha
+    this._escHandler = (e) => {
+      if (e.code === 'Escape' && this.visible) {
+        this.toggle();
+      }
+    };
+    window.addEventListener('keydown', this._escHandler);
+  }
+
+  // ------------------------------------------------------------------
+  // Helpers de DOM
+  // ------------------------------------------------------------------
+  _mkButton(label, onClick) {
+    const b = document.createElement('button');
+    b.className = 'tuning-button';
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  _mkPreset(label, key) {
+    const b = document.createElement('button');
+    b.className = 'tuning-preset';
+    b.textContent = label;
+    b.addEventListener('click', () => this.applyPreset(key));
+    return b;
+  }
+
+  _mkSection(title) {
+    const s = document.createElement('div');
+    s.className = 'tuning-section';
+    s.textContent = title;
+    return s;
+  }
+
+  _mkSlider(parent, key, label, min, max, step, decimals, onChange) {
+    const row = document.createElement('div');
+    row.className = 'tuning-row';
+
+    const lab = document.createElement('div');
+    lab.className = 'tuning-label';
+    lab.textContent = label;
+
+    const val = document.createElement('div');
+    val.className = 'tuning-value';
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'tuning-slider';
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = String(step);
+
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      val.textContent = v.toFixed(decimals);
+      try { onChange(v); } catch (e) { console.warn('TuningUI onChange', key, e); }
+    });
+
+    row.appendChild(lab);
+    row.appendChild(val);
+    row.appendChild(slider);
+    parent.appendChild(row);
+
+    this.controls[key] = {
+      type: 'slider',
+      element: slider,
+      valueEl: val,
+      decimals,
+      onChange,
+      set: (v) => {
+        slider.value = String(v);
+        val.textContent = (+v).toFixed(decimals);
+      },
+      get: () => parseFloat(slider.value),
+    };
+  }
+
+  _mkSelect(parent, key, label, options, onChange) {
+    const row = document.createElement('div');
+    row.className = 'tuning-row';
+
+    const lab = document.createElement('div');
+    lab.className = 'tuning-label';
+    lab.textContent = label;
+
+    const val = document.createElement('div');
+    val.className = 'tuning-value';
+    val.textContent = '';
+
+    const sel = document.createElement('select');
+    sel.className = 'tuning-select';
+    for (const o of options) {
+      const opt = document.createElement('option');
+      opt.value = o.value;
+      opt.textContent = o.label;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => {
+      val.textContent = sel.options[sel.selectedIndex]?.textContent || '';
+      try { onChange(sel.value); } catch (e) { console.warn('TuningUI onChange', key, e); }
+    });
+
+    row.appendChild(lab);
+    row.appendChild(val);
+    row.appendChild(sel);
+    parent.appendChild(row);
+
+    this.controls[key] = {
+      type: 'select',
+      element: sel,
+      valueEl: val,
+      onChange,
+      set: (v) => {
+        sel.value = v;
+        val.textContent = sel.options[sel.selectedIndex]?.textContent || '';
+      },
+      get: () => sel.value,
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // Sync UI ← car
+  // ------------------------------------------------------------------
+  _syncFromCar() {
+    const c = this.car;
+    if (!c) return;
+    const pt = c.powertrain;
+    const cfg = c.cfg ?? {};
+
+    const finalDrive = pt?.differential?.finalDrive ?? pt?.finalDrive ?? cfg.diffRatio ?? 3.8;
+    this.controls.finalDrive?.set(finalDrive);
+
+    const gr = pt?.gearbox?.gearRatios ?? cfg.gearRatios ?? [];
+    for (let g = 1; g <= 6; g++) {
+      const idx = g + 1;
+      const v = gr[idx];
+      if (typeof v === 'number') this.controls[`gear${g}`]?.set(v);
+    }
+
+    const diff = pt?.differential;
+    if (diff) {
+      const t = diff.type;
+      // map legacy 'lsd' → 'lsd_clutch' for UI
+      const uiType = (t === 'lsd') ? 'lsd_clutch' : t;
+      this.controls.diffType?.set(uiType ?? 'open');
+      this.controls.powerLock?.set(((diff.powerLock ?? 0) * 100));
+      this.controls.coastLock?.set(((diff.coastLock ?? 0) * 100));
+      this.controls.preload?.set(diff.preload ?? diff.lsdPreload ?? 0);
+    }
+
+    if (pt?.tc) this.controls.tcMode?.set(pt.tc.mode ?? 'off');
+    this.controls.brakeBiasFront?.set((cfg.brakeBiasFront ?? 0.62) * 100);
+    if (pt?.engine) this.controls.engineInertia?.set(pt.engine.inertia ?? 0.18);
+    if (pt?.turbo) this.controls.turboMaxBoost?.set(pt.turbo.maxBoost ?? 0);
+  }
+
+  // ------------------------------------------------------------------
+  // Snapshot / Save / Load / Reset
+  // ------------------------------------------------------------------
+  _snapshot() {
+    const c = this.car;
+    if (!c) return null;
+    const pt = c.powertrain ?? {};
+    const diff = pt.differential ?? {};
+    return {
+      finalDrive: diff.finalDrive ?? pt.finalDrive ?? c.cfg?.diffRatio ?? 3.8,
+      gearRatios: Array.isArray(pt.gearbox?.gearRatios)
+        ? [...pt.gearbox.gearRatios]
+        : (Array.isArray(c.cfg?.gearRatios) ? [...c.cfg.gearRatios] : []),
+      differential: {
+        type: diff.type ?? 'open',
+        preload: diff.preload ?? diff.lsdPreload ?? 50,
+        powerLock: diff.powerLock ?? 0.5,
+        coastLock: diff.coastLock ?? 0.3,
+      },
+      tcMode: pt.tc?.mode ?? 'off',
+      brakeBiasFront: c.cfg?.brakeBiasFront ?? 0.62,
+      engineInertia: pt.engine?.inertia ?? 0.18,
+      turboMaxBoost: pt.turbo?.maxBoost ?? 0,
+    };
+  }
+
+  saveSetup() {
+    try {
+      const data = this._snapshot();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      console.log('[TuningUI] saved setup', data);
+    } catch (e) {
+      console.warn('[TuningUI] saveSetup failed', e);
+    }
+  }
+
+  loadSetup() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      this._applyData(data);
+      this._syncFromCar();
+      console.log('[TuningUI] loaded setup', data);
+    } catch (e) {
+      console.warn('[TuningUI] loadSetup failed', e);
+    }
+  }
+
+  resetDefault() {
+    if (!this.defaults) return;
+    this._applyData(this.defaults);
+    this._syncFromCar();
+  }
+
+  // ------------------------------------------------------------------
+  // Presets
+  // ------------------------------------------------------------------
+  applyPreset(key) {
+    const p = PRESETS[key];
+    if (!p) {
+      console.warn('[TuningUI] unknown preset', key);
+      return;
+    }
+    if (typeof this.car.applyPreset === 'function') {
+      this.car.applyPreset(p);
+    } else {
+      this._applyData(p);
+    }
+    this._syncFromCar();
+    console.log('[TuningUI] applied preset', p.name ?? key);
+  }
+
+  // ------------------------------------------------------------------
+  // Apply raw data object (used by Load/Reset; presets prefer car.applyPreset)
+  // ------------------------------------------------------------------
+  _applyData(d) {
+    const c = this.car;
+    if (!c) return;
+    const pt = c.powertrain;
+
+    if (typeof d.finalDrive === 'number') {
+      if (c.cfg) c.cfg.diffRatio = d.finalDrive;
+      if (pt) pt.finalDrive = d.finalDrive;
+      if (pt?.differential) pt.differential.finalDrive = d.finalDrive;
+    }
+
+    if (Array.isArray(d.gearRatios)) {
+      if (pt?.gearbox) pt.gearbox.gearRatios = [...d.gearRatios];
+      if (c.cfg) c.cfg.gearRatios = [...d.gearRatios];
+    }
+
+    if (d.differential && pt?.differential) {
+      const diff = pt.differential;
+      if (typeof d.differential.type === 'string') diff.type = d.differential.type;
+      if (typeof d.differential.preload === 'number') diff.preload = d.differential.preload;
+      if (typeof d.differential.powerLock === 'number') diff.powerLock = d.differential.powerLock;
+      if (typeof d.differential.coastLock === 'number') diff.coastLock = d.differential.coastLock;
+    }
+
+    if (typeof d.tcMode === 'string' && pt) {
+      if (typeof pt.setTCMode === 'function') pt.setTCMode(d.tcMode);
+      else if (pt.tc) pt.tc.mode = d.tcMode;
+    }
+
+    if (typeof d.brakeBiasFront === 'number' && c.cfg) {
+      c.cfg.brakeBiasFront = d.brakeBiasFront;
+    }
+
+    if (typeof d.engineInertia === 'number' && pt?.engine) {
+      pt.engine.inertia = d.engineInertia;
+    }
+
+    if (typeof d.turboMaxBoost === 'number' && pt?.turbo) {
+      pt.turbo.maxBoost = d.turboMaxBoost;
+    }
+  }
+}
+
+export default TuningUI;

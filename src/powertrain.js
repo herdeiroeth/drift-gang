@@ -44,6 +44,10 @@ export class Engine {
     this.frictionLinear     = opts.frictionLinear     ?? 0.008;
     this.frictionQuadratic  = opts.frictionQuadratic  ?? 1.2e-5;
 
+    // Coast torque (engine braking quando solta o acelerador, proporcional ao RPM).
+    // Em Nm @ redline. Aplicado adicionalmente à fricção quando throttle < 0.05.
+    this.coastTorque        = opts.coastTorque        ?? 60.0;
+
     // Idle control
     this.idleMode       = opts.idleMode       ?? 'active';  // 'active'|'passive'
     this.idleGain       = opts.idleGain       ?? 0.15;      // corretivo proporcional
@@ -83,6 +87,16 @@ export class Engine {
          + this.frictionQuadratic * w * w;
   }
 
+  /**
+   * Engine braking real (coast torque). Proporcional ao RPM relativo ao redline.
+   * Retorna torque NEGATIVO (sempre opondo a rotação do motor).
+   * Aplicado quando throttle ≈ 0 e rpm > idle, somando à fricção viscosa.
+   */
+  getCoastTorque(rpm) {
+    if (rpm <= this.idleRPM) return 0;
+    return -this.coastTorque * (rpm / this.redlineRPM);
+  }
+
   // Estado livre (neutro, embreagem aberta, ou slip)
   updateFree(dt, clutchTransmitTorque = 0, externalLoadTorque = 0) {
     if (!this.isRunning) {
@@ -94,13 +108,20 @@ export class Engine {
     const rawTorque = this.getTorqueAt(this.rpm);
     const friction = this.getFrictionTorque(w);
 
+    // Coast (engine braking) — só aplicado off-throttle e acima do idle
+    let coast = 0;
+    if (this.throttlePos < 0.05 && this.rpm > this.idleRPM) {
+      coast = this.getCoastTorque(this.rpm);   // negativo
+    }
+
     // Idle control ativo
     let idleCorrection = 0;
     if (this.rpm < this.idleRPM + 200) {
       idleCorrection = (this.idleRPM - this.rpm) * this.idleGain;
     }
 
-    const netTorque = rawTorque - friction - clutchTransmitTorque + idleCorrection;
+    const netTorque = rawTorque - friction + coast - clutchTransmitTorque + idleCorrection;
+    // semi-implicit Euler: v += a·dt (depois rpm é derivado de v).
     this.angularVel += (netTorque / this.inertia) * dt;
     this.rpm = this.omegaToRPM(this.angularVel);
 
@@ -130,13 +151,19 @@ export class Engine {
     const rawTorque = this.getTorqueAt(this.rpm);
     const friction = this.getFrictionTorque(this.angularVel);
 
+    // Coast (engine braking): só off-throttle E acima do idle
+    let coast = 0;
+    if (this.throttlePos < 0.05 && this.rpm > this.idleRPM) {
+      coast = this.getCoastTorque(this.rpm);  // negativo
+    }
+
     // Idle correction se necessário
     let idleCorrection = 0;
     if (this.rpm < this.idleRPM + 100 && this.throttlePos < 0.05) {
       idleCorrection = (this.idleRPM - this.rpm) * this.idleGain;
     }
 
-    const netTorque = rawTorque - friction - clutchTransmitTorque + idleCorrection;
+    const netTorque = rawTorque - friction + coast - clutchTransmitTorque + idleCorrection;
 
     this._applyRevLimiter();
     if (this.rpm < 0) { this.rpm = 0; this.angularVel = 0; }
@@ -226,22 +253,56 @@ export class Clutch {
     return this.maxTorqueTransfer * engaged * wearFactor;
   }
 
-  // Torque REAL transmitido ao drivetrain
-  getTransmittingTorque(engineTorque) {
+  // Torque REAL transmitido ao drivetrain.
+  // Modelo Karnopp friction com tanh smooth: elimina o boolean "stick vs slip"
+  // por uma transição contínua T_friction = T_max · tanh(k·Δω). Quando Δω≈0
+  // o torque transmitido é o do motor (stick); quando Δω cresce, satura em
+  // ±T_max. Isso evita chatter na fronteira stick/slip.
+  getTransmittingTorque(engineTorque, deltaOmega = 0) {
     const maxTransfer = this.getMaxTransferableTorque();
-    if (Math.abs(engineTorque) <= maxTransfer) {
-      this.isSlipping = false;
-      this.temperature *= 0.95;  // resfria rápido
-      return engineTorque;  // 100% transmitido
+    const k = 5.0;  // smoothness factor (rad/s⁻¹) — Karnopp tanh slope
+    const dw = deltaOmega;
+    const tanhFactor = Math.tanh(k * dw);
+    // Capacidade dinâmica do clutch acompanha tanh: |Δω| pequeno → ~0
+    // ⇒ permite stick (passa o engineTorque inteiro). |Δω| grande → ±maxTransfer.
+    const frictionCap = maxTransfer * Math.abs(tanhFactor);
+    // Stick: |Δω| pequeno, frictionCap também é pequeno mas o torque a transmitir
+    // ≤ engineTorque do motor — quando |Δω| < 0.5, "stick" e passa o torque
+    // demandado (limitado pelo cap absoluto).
+    let transmitted;
+    const stickThreshold = 0.5;  // rad/s
+    const isStick = Math.abs(dw) < stickThreshold;
+    if (isStick) {
+      // Stick zone: clutch carrega o que o motor pede, até o teto absoluto.
+      const sign = Math.sign(engineTorque) || 1;
+      transmitted = sign * Math.min(Math.abs(engineTorque), maxTransfer);
     } else {
-      this.isSlipping = true;
-      this.temperature += Math.abs(engineTorque - maxTransfer) * 0.01;
-      this.wear += Math.abs(engineTorque - maxTransfer) * 1e-6;  // desgaste lento
+      // Slip zone: torque de fricção dominante, direção dada pelo Δω
+      // (velocidade relativa: motor mais rápido → torque positivo no eixo).
+      const sign = Math.sign(dw);
+      transmitted = sign * Math.min(maxTransfer, Math.abs(engineTorque) + frictionCap);
+      // Não pode exceder o que o motor realmente produz nessa direção.
+      if (Math.sign(engineTorque) === sign) {
+        transmitted = sign * Math.min(Math.abs(engineTorque), maxTransfer);
+      } else {
+        // engine braking contra o sentido de Δω: cap por friction
+        transmitted = sign * Math.min(maxTransfer * Math.abs(tanhFactor), Math.abs(engineTorque));
+      }
+    }
+
+    // Estado derivado (não mais boolean rígido — apenas heurística pra HUD/wear)
+    this.isSlipping = Math.abs(dw) > stickThreshold;
+    if (this.isSlipping) {
+      const slipAmt = Math.abs(dw) * Math.abs(transmitted);
+      this.temperature += slipAmt * 0.0005;
+      this.wear += slipAmt * 5e-8;
       this.temperature = Math.min(1000, this.temperature);
       this.wear = Math.min(1.0, this.wear);
-      const sign = Math.sign(engineTorque);
-      return sign * maxTransfer;  // Limitado pela capacidade
+    } else {
+      this.temperature *= 0.95;
     }
+
+    return transmitted;
   }
 
   // Estado booleano
@@ -265,7 +326,8 @@ export class Gearbox {
   constructor(opts = {}) {
     this.gearRatios = opts.gearRatios ?? [0, -2.9, 3.6, 2.2, 1.5, 1.1, 0.85, 0.65];
     // index: 0=neutral, 1=reverse, 2=1st, 3=2nd, etc.
-    this.shiftTime = opts.shiftTime ?? 0.35;     // segundos de troca
+    this.mode = opts.mode ?? 'h_pattern';        // 'h_pattern' | 'sequential'
+    this.shiftTime = opts.shiftTime ?? (this.mode === 'sequential' ? 0.06 : 0.35);
     this.currentGear = 2;  // start in 1st
     this.targetGear = 2;
     this.isShifting = false;
@@ -273,12 +335,30 @@ export class Gearbox {
     this.shiftCooldown = 0;
     this.autoShift = opts.autoShift ?? true;
 
+    // Sequential gearbox features
+    this.ignitionCutDuringShift = (this.mode === 'sequential');
+    // Rev-match blip: setado em downshift sequencial; PowertrainSystem usa por
+    // alguns ms para forçar engine.rpm ≥ blipRPM (simula o "throttle blip").
+    this.pendingEngineBlipRPM = 0;
+    this.pendingBlipTimer = 0;     // segundos restantes de blip ativo
+
     // Shift map dinâmico
     this.upshiftBaseRPM   = opts.upshiftBaseRPM   ?? 4000;
     this.upshiftRedline   = opts.upshiftRedline   ?? 7000;
     this.downshiftBaseRPM = opts.downshiftBaseRPM ?? 2000;
     this.downshiftPower   = opts.downshiftPower   ?? 4500;
     this.reverseLockSpeed = opts.reverseLockSpeed ?? 1.0;  // m/s
+
+    // Cache para rev-match
+    this._lastWheelOmega = 0;
+    this._finalDrive = opts.finalDrive ?? 3.8;
+  }
+
+  setMode(mode) {
+    if (mode !== 'h_pattern' && mode !== 'sequential') return;
+    this.mode = mode;
+    this.shiftTime = (mode === 'sequential') ? 0.06 : 0.35;
+    this.ignitionCutDuringShift = (mode === 'sequential');
   }
 
   getGearRatio() {
@@ -306,6 +386,19 @@ export class Gearbox {
   shiftDown() {
     if (this.isShifting || this.currentGear <= 1) return false;
     this.targetGear = this.currentGear - 1;
+
+    // Rev-match em downshift sequencial: calcula RPM esperado na nova marcha
+    // e arma um blip de 100ms para o PowertrainSystem aplicar.
+    if (this.mode === 'sequential') {
+      const newRatio = this.gearRatios[this.targetGear] ?? 0;
+      if (Math.abs(newRatio) > 0.01) {
+        const wheelOmega = this._lastWheelOmega;
+        const targetEngineRPM = Math.abs(wheelOmega) * Math.abs(newRatio) * this._finalDrive * 30 / Math.PI;
+        this.pendingEngineBlipRPM = targetEngineRPM;
+        this.pendingBlipTimer = 0.1;  // 100 ms de blip ativo
+      }
+    }
+
     this._startShift();
     return true;
   }
@@ -332,12 +425,25 @@ export class Gearbox {
   update(dt, engineRPM, throttleInput, avgRearWheelOmega, finalDrive, handbrakeInput) {
     if (this.shiftCooldown > 0) this.shiftCooldown -= dt;
 
+    // Cache para rev-match em downshift
+    this._lastWheelOmega = avgRearWheelOmega;
+    this._finalDrive = finalDrive;
+
+    // Decay do blip de rev-match (sequencial)
+    if (this.pendingBlipTimer > 0) {
+      this.pendingBlipTimer -= dt;
+      if (this.pendingBlipTimer <= 0) {
+        this.pendingBlipTimer = 0;
+        this.pendingEngineBlipRPM = 0;
+      }
+    }
+
     if (this.isShifting) {
       this.shiftTimer -= dt;
       if (this.shiftTimer <= 0) {
         this.currentGear = this.targetGear;
         this.isShifting = false;
-        this.shiftCooldown = 0.15;  // cooldown pos-troca
+        this.shiftCooldown = (this.mode === 'sequential') ? 0.04 : 0.15;
       }
       return;  // durante troca: gearRatio = 0
     }
@@ -373,74 +479,146 @@ export class Gearbox {
 // DIFFERENTIAL — Open / Welded / LSD
 // ========================================================================
 
+/**
+ * Differential — interface AC/VPP canônica.
+ * Tipos suportados: 'open' | 'welded' | 'lsd_clutch' | 'torsen'
+ *
+ * Aliases legados: 'lsd' → 'lsd_clutch' (compat retroativa).
+ *
+ * Salisbury / clutch-pack (lsd_clutch):
+ *   T_lock = preload + powerLock·|T_input|·tan(45°)   se acelerando (T·ω > 0)
+ *   T_lock = preload + coastLock·|T_input|·tan(60°)   se freando motor
+ *   torque flui da roda mais rápida → mais lenta.
+ *
+ * Welded:
+ *   damping forte K (ωL−ωR)/2 aplicado em sentidos opostos para
+ *   forçar igualdade angular. Não é constraint rígido (eq de velocidade)
+ *   mas converge rapidamente em poucos sub-steps.
+ *
+ * Torsen:
+ *   torque bias ratio (TBR ~ 2.5–3.5 em street).
+ *   Se T_low·TBR < T_high → transfere o excesso para o low-side.
+ *   Comporta-se como open dentro do TBR.
+ */
+
+const TAN_POWER_ANGLE = Math.tan(45 * Math.PI / 180);   // 1.0
+const TAN_COAST_ANGLE = Math.tan(60 * Math.PI / 180);   // ~1.732
+const WELDED_DAMPING_K = 50000;  // N·m·s/rad — forte, mas estável
+
 export class Differential {
   constructor(opts = {}) {
-    this.type = opts.type ?? 'open';  // 'open'|'welded'|'lsd'
+    // Aliases para compat com nomes antigos
+    let type = opts.type ?? 'open';
+    if (type === 'lsd') type = 'lsd_clutch';
+    this.type = type;  // 'open'|'welded'|'lsd_clutch'|'torsen'
+
     this.finalDrive = opts.finalDrive ?? 3.8;
     this.efficiency = opts.efficiency ?? 0.85;
 
-    // LSD params
-    this.lsdPreload     = opts.lsdPreload     ?? 50;    // Nm
-    this.lsdLockRate    = opts.lsdLockRate    ?? 0.002; // lock per rad/s diff
-    this.lsdMaxLock     = opts.lsdMaxLock     ?? 0.95;  // max lock ratio
+    // ---- Salisbury / clutch-pack (lsd_clutch)
+    this.preload   = opts.preload   ?? opts.lsdPreload ?? 50;     // Nm sempre aplicado
+    this.powerLock = opts.powerLock ?? 0.4;   // 0=open, 1=spool — sob aceleração
+    this.coastLock = opts.coastLock ?? 0.15;  // 0=open, 1=spool — em coast/motor freio
 
-    // Estado
+    // ---- Torsen
+    this.torsenTBR = opts.torsenTBR ?? 3.0;   // street: 2.5-3.5
+
+    // Estado (HUD/telemetria)
     this.lockAmount = 0;
   }
 
-  // Recebe torque total do motor após gearbox, retorna split L/R
-  split(totalTorque, omegaLeft, omegaRight, brakeTorqueL = 0, brakeTorqueR = 0) {
-    const absTotal = Math.abs(totalTorque);
-
+  /**
+   * Divide o torque entre as duas rodas motrizes.
+   * @param {number} totalTorque  torque na entrada do diff (após gearbox·finalDrive·efficiency)
+   * @param {number} omegaLeft    velocidade angular da roda esquerda (rad/s)
+   * @param {number} omegaRight   velocidade angular da roda direita (rad/s)
+   * @returns {[number, number]}  [torqueL, torqueR] aplicáveis na roda
+   */
+  split(totalTorque, omegaLeft, omegaRight) {
+    // ===== OPEN =====
     if (this.type === 'open') {
-      // 50/50 fixo, como no powertrain original
-      return [
-        totalTorque * 0.5 * this.efficiency,
-        totalTorque * 0.5 * this.efficiency
-      ];
+      this.lockAmount = 0;
+      const half = totalTorque * 0.5 * this.efficiency;
+      return [half, half];
     }
 
+    // ===== WELDED =====
+    // Aplicamos torque base 50/50 + damping fortíssimo que arrasta as duas ω
+    // para a mesma média. Para evitar explosão do integrator, clampamos o
+    // damping ao máximo torque que o pneu consegue reagir (μN·R, estimado ~2000 Nm).
+    // Resultado: ωL ≈ ωR depois de alguns sub-steps; resíduo aceitável.
     if (this.type === 'welded') {
-      // Spool: força ambas as rodas a terem a mesma velocidade
-      // Split é baseado na disponibilidade de tração
-      // Se uma roda patina → outra recebe mais torque
-      // Simplificação arcade:
-      const avgOmega = (omegaLeft + omegaRight) * 0.5;
-      const omegaDiff = Math.abs(omegaLeft - omegaRight);
-      
-      // Mais lock → mais igual
-      this.lockAmount = 1.0;  // welded = sempre 100%
-      
-      // Para drift welded: quando uma roda acelera mais que a outra,
-      // o torque não diminui — é distribuído pelo que consegue segurar
-      // Simplificação: split 50/50 com damping da diferença
-      const damping = Math.max(0, 1.0 - omegaDiff * 0.5);  // menos damping se dif alta
+      this.lockAmount = 1.0;
+      const omegaDiff = omegaLeft - omegaRight;
+      let dampingTorque = WELDED_DAMPING_K * (omegaDiff * 0.5);
+      // Clamp para o que um pneu consegue absorver realisticamente — evita
+      // explosão numérica quando Δω é alto. ~2000 Nm equivale a μ·N·R com
+      // μ=1, N=6kN, R=0.34m (folgado para SUV; passa a saturar pneu).
+      const DAMP_CLAMP = 2000;
+      if (dampingTorque >  DAMP_CLAMP) dampingTorque =  DAMP_CLAMP;
+      if (dampingTorque < -DAMP_CLAMP) dampingTorque = -DAMP_CLAMP;
+      const baseHalf = totalTorque * 0.5 * this.efficiency;
       return [
-        totalTorque * 0.5 * this.efficiency * damping,
-        totalTorque * 0.5 * this.efficiency * damping
+        baseHalf - dampingTorque,
+        baseHalf + dampingTorque,
       ];
     }
 
-    if (this.type === 'lsd') {
-      // Lock baseado na diferença de velocidade angular
-      const omegaDiff = Math.abs(omegaLeft - omegaRight);
-      this.lockAmount = Math.min(this.lsdMaxLock,
-        this.lsdPreload / 1000 + this.lsdLockRate * omegaDiff);
+    // ===== LSD CLUTCH (Salisbury) =====
+    if (this.type === 'lsd_clutch') {
+      const isPower = totalTorque > 0;  // power-on (acelerando)
+      const tan = isPower ? TAN_POWER_ANGLE : TAN_COAST_ANGLE;
+      const ramp = isPower ? this.powerLock : this.coastLock;
+      const T_lock = this.preload + ramp * Math.abs(totalTorque) * tan;
+      this.lockAmount = Math.min(1.0, T_lock / Math.max(1, Math.abs(totalTorque) + this.preload));
 
-      // Split: mais torque para a roda mais LENTA (que tem mais grip)
-      let leftRatio = 0.5;
-      if (omegaLeft > omegaRight) {
-        // Roda esquerda girando mais rápido (menos grip) → menos torque
-        leftRatio = 0.5 - (this.lockAmount - 0.5) * 0.5;
-      } else if (omegaRight > omegaLeft) {
-        leftRatio = 0.5 + (this.lockAmount - 0.5) * 0.5;
-      }
-      leftRatio = Math.max(0.1, Math.min(0.9, leftRatio));
-      
+      const baseHalf = totalTorque * 0.5 * this.efficiency;
+      const omegaDiff = omegaLeft - omegaRight;
+
+      // direção do transfer: torque vai pra roda MAIS LENTA
+      // se ωL > ωR: left é o "fast" → tira torque do left, dá pro right
+      // T_transfer no máximo = T_lock/2 (cada lado recebe ±T_lock/2 de redistribuição)
+      const transferMag = Math.min(Math.abs(T_lock) * 0.5, Math.abs(baseHalf) * 2);
+      const sign = Math.sign(omegaDiff);   // +1 se left mais rápido
       return [
-        totalTorque * leftRatio * this.efficiency,
-        totalTorque * (1 - leftRatio) * this.efficiency
+        baseHalf - sign * transferMag,
+        baseHalf + sign * transferMag,
       ];
+    }
+
+    // ===== TORSEN =====
+    // Comporta como open enquanto |T_high / T_low| ≤ TBR.
+    // Quando excede, transfere o excesso pro lado low.
+    // Limitação real: se uma roda perde contato (omega disparando), o lock colapsa.
+    if (this.type === 'torsen') {
+      // Estimativa: o lado com ω maior é o "spinning" (low grip).
+      // No regime de open (sem evento de spin), divide 50/50.
+      // Quando omegaDiff é alta, simulamos o torque-bias bias usando a magnitude
+      // da diferença como proxy do "torque que cada roda 'pede'".
+      const omegaDiff = Math.abs(omegaLeft - omegaRight);
+      const TBR = this.torsenTBR;
+
+      // Se rodas próximas em ω: open. Se uma dispara, transfere até TBR:1.
+      // Threshold: ~ 5 rad/s = ~50rpm de roda; ajustável.
+      const spinThreshold = 2.0;
+      const lockRatio = Math.min(1.0, Math.max(0, (omegaDiff - spinThreshold) / 5.0));
+      this.lockAmount = lockRatio;
+
+      // Lado mais lento ganha torque até TBR vezes o do mais rápido
+      // T_low = totalTorque * (TBR / (TBR + 1))   no limite (lockRatio=1)
+      // T_high = totalTorque * (1 / (TBR + 1))
+      const baseHalf = 0.5;
+      const lowFrac  = baseHalf + lockRatio * (TBR / (TBR + 1) - baseHalf);
+      const highFrac = 1 - lowFrac;
+
+      const omegaDiffSigned = omegaLeft - omegaRight;
+      const eff = this.efficiency;
+      if (omegaDiffSigned > 0) {
+        // left = fast (high RPM, low grip) → menos torque
+        return [totalTorque * highFrac * eff, totalTorque * lowFrac * eff];
+      } else {
+        return [totalTorque * lowFrac * eff, totalTorque * highFrac * eff];
+      }
     }
 
     return [0, 0];
@@ -499,13 +677,15 @@ export class LaunchControl {
     this.launchRPM      = opts.launchRPM      ?? 4500;
     this.minSpeed      = opts.minSpeed       ?? 1.5;   // m/s
     this.enabled       = opts.enabled        ?? true;
+    this.armed         = opts.armed          ?? false; // toggle manual (KeyL)
     this.active        = false;
     this.engagedTimer  = 0;
   }
 
   update(clutchPedal, throttle, speedMS, engineRPM) {
-    if (!this.enabled) {
+    if (!this.enabled || !this.armed) {
       this.active = false;
+      this.engagedTimer = 0;
       return false;
     }
 
@@ -583,10 +763,10 @@ export class Turbocharger {
   }
 
   // Torque multiplier: engineTorque *= mult
+  // AC modding standard: 1 bar de boost = +100% torque.
+  // MAX_BOOST=1.5 (default Turbo) ⇒ até +150% no peak.
   getTorqueMultiplier() {
-    // Boost em bar → pressão adicional
-    // 1 bar = pressão atmosférica extra → ~30% mais torque
-    return 1.0 + (this.boostBar / 1.0) * 0.35;
+    return 1.0 + this.boostBar;
   }
 
   getBoostPSI() {
@@ -654,34 +834,46 @@ export class PowertrainSystem {
     // 5. Launch control
     this.launch.update(clutchPedal, throttle, speedMS, this.engine.rpm);
 
-    // 6. Determinar estado do clutch
-    const clutchMax = this.clutch.getMaxTransferableTorque();
+    // 6. Determinar estado do clutch (Karnopp tanh model)
+    // Δω = engineOmega - drivetrainOmega·gearRatio·finalDrive (em rad/s).
+    const ptGearRatio = this.gearbox.getGearRatio();
+    const drivetrainSideOmega = avgRearOmega * ptGearRatio * this.finalDrive;
+    const deltaOmega = this.engine.angularVel - drivetrainSideOmega;
     const engineRawTorque = this.engine.getTorqueAt(this.engine.rpm, throttle);
-    const willSlip = Math.abs(engineRawTorque) > clutchMax;
 
     let transmittedTorque = 0;
-    let netEngineTorque = 0;
 
-    if (this.gearbox.isShifting || this.gearbox.getGearRatio() === 0) {
-      // Neutro ou trocando: motor roda livre
+    if (this.gearbox.isShifting || ptGearRatio === 0) {
+      // Neutro ou trocando: ignição cortada (já é gearRatio=0). No sequential,
+      // explicitamos que torque transmitido = 0 (ignition cut).
       transmittedTorque = 0;
       this.engine.updateFree(dt, 0, 0);
       this.clutch.isSlipping = false;
 
-    } else if (!willSlip && this.clutch.isEngaged()) {
-      // TRAVADO (locked): motor + drivetrain acoplados
-      // O RPM do motor é imposto pela velocidade das rodas
-      const coupledOmega = this.gearbox.getWheelOmega(this.engine.rpm, this.finalDrive);
-      this.engine.angularVel = avgRearOmega * this.gearbox.getGearRatio() * this.finalDrive;
+    } else if (Math.abs(deltaOmega) < 0.5 && this.clutch.isEngaged() && Math.abs(avgRearOmega) > 0.5) {
+      // STICK (Δω≈0 e clutch fechado e movendo): motor + drivetrain acoplados.
+      // Sincroniza engine ao drivetrain.
+      this.engine.angularVel = drivetrainSideOmega;
       this.engine.rpm = this.engine.omegaToRPM(this.engine.angularVel);
 
       transmittedTorque = this.engine.updateLocked(dt, this.engine.angularVel, 0);
+      // Para HUD: stick zone — sem slip percebido
       this.clutch.isSlipping = false;
+      this.clutch.temperature *= 0.95;
 
     } else {
-      // SLIPPANDO: motor acelera livre, torque limitado ao clutch
-      transmittedTorque = this.clutch.getTransmittingTorque(engineRawTorque);
+      // SLIP ou parado: torque transmitido via Karnopp (tanh smooth)
+      transmittedTorque = this.clutch.getTransmittingTorque(engineRawTorque, deltaOmega);
       this.engine.updateFree(dt, transmittedTorque, 0);
+    }
+
+    // Rev-match blip (sequencial): força engine.rpm pra cima durante 100ms
+    // após um downshift, simulando throttle blip automático.
+    if (this.gearbox.pendingBlipTimer > 0 && this.gearbox.pendingEngineBlipRPM > 0) {
+      if (this.engine.rpm < this.gearbox.pendingEngineBlipRPM) {
+        this.engine.rpm = this.gearbox.pendingEngineBlipRPM;
+        this.engine.angularVel = this.engine.rpmToOmega(this.engine.rpm);
+      }
     }
 
     // 7. Traction Control
@@ -732,10 +924,12 @@ export class PowertrainSystem {
       rpm: this.engine.rpm,
       gear: this.gearbox.getGearName(),
       isShifting: this.gearbox.isShifting,
+      gearboxMode: this.gearbox.mode,
       clutchSlip: this.clutch.isSlipping ? this.clutch.getSlipPercentage(this.engine.rpm, drivetrainRPM) : 0,
       tcActive: this.tc.active,
       tcCut: this.tc.cutLevel,
       launchActive: this.launch.active,
+      launchArmed: this.launch.armed,
       boostPsi: this.turbo ? this.turbo.getBoostPSI() : 0,
       turboSpooling: this.turbo ? this.turbo.isSpooling : false,
       clutchTemp: this.clutch.temperature,

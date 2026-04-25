@@ -1,0 +1,11 @@
+{
+  "name": "Drift Beginner",
+  "description": "LSD clutch-pack moderado, gear ratios curtos, fácil iniciar slide",
+  "finalDrive": 4.10,
+  "gearRatios": [0, -2.9, 3.16, 1.88, 1.33, 1.0, 0.81, 0.65],
+  "differential": { "type": "lsd_clutch", "preload": 60, "powerLock": 0.45, "coastLock": 0.25 },
+  "tcMode": "low",
+  "brakeBiasFront": 0.55,
+  "engineInertia": 0.18,
+  "turboMaxBoost": 0.8
+}

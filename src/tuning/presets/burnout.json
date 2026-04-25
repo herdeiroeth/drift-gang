@@ -1,0 +1,11 @@
+{
+  "name": "Burnout",
+  "description": "Welded, gear 1ª super curto, final drive alto, turbo max, inércia baixa",
+  "finalDrive": 5.50,
+  "gearRatios": [0, -2.9, 4.50, 2.40, 1.65, 1.20, 0.95, 0.75],
+  "differential": { "type": "welded", "preload": 200, "powerLock": 1.0, "coastLock": 1.0 },
+  "tcMode": "off",
+  "brakeBiasFront": 0.60,
+  "engineInertia": 0.12,
+  "turboMaxBoost": 2.0
+}

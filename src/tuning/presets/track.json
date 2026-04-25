@@ -1,0 +1,11 @@
+{
+  "name": "Track",
+  "description": "LSD com mais coast lock pra estabilizar curva, brake bias dianteiro, gear longo",
+  "finalDrive": 3.40,
+  "gearRatios": [0, -2.9, 3.40, 2.10, 1.55, 1.20, 0.95, 0.75],
+  "differential": { "type": "lsd_clutch", "preload": 80, "powerLock": 0.30, "coastLock": 0.40 },
+  "tcMode": "off",
+  "brakeBiasFront": 0.62,
+  "engineInertia": 0.20,
+  "turboMaxBoost": 0.6
+}
