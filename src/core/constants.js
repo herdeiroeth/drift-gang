@@ -37,4 +37,28 @@ export const PHYSICS_CFG = {
   // Steer "safe" — reduz max steer com velocidade (anti-flip)
   safeSteerMaxSpeed: 120.0,
   safeSteerCap: 100.0,
+
+  // ----- Gear-shift gating (Forza/AC style) -----
+  // Margem em RPM acima do redline tolerada num downshift (rev-match window).
+  // Se projectedRPM(newGear) > maxRPM + margin → recusa o shift (motor explodiria).
+  shiftOverrevMarginRPM: 250,
+
+  // RPM mínimo aceitável após upshift. Abaixo disso é "bog" (motor afogado).
+  // Auto-shift usa também isso para decidir SE faz upshift (precisa cair acima).
+  shiftMinRPMAfterUpshift: 1700,
+
+  // RPM-alvo ideal pós-upshift no auto-shift; só upshift quando o RPM previsto
+  // na próxima marcha cair entre [minRPMAfterUpshift, redline-margem].
+  // Implementação: upshift se projectedRPM ≥ minPostShiftRPM E motorRPM atual ≥ upshiftRPM.
+  shiftMinPostUpshiftRPM: 2400,
+
+  // Cooldown entre auto-shifts (s). Maior = menos chatter.
+  shiftCooldownH: 0.55,
+  shiftCooldownSeq: 0.18,
+
+  // Auto-shift requer engine ESTAR acoplado ao drivetrain (clutch sem slip).
+  // Se clutch tá slipping (arrancada, burnout), auto-shift usa o
+  // drivetrainRPM (RPM virtual da roda) em vez de engineRPM como sinal.
+  // Isso evita pular pra 6ª em arrancada.
+  autoShiftUseDrivetrainRPMWhenSlip: true,
 };

@@ -12,7 +12,10 @@ export class CarConfig {
     this.wheelMass = opts.wheelMass ?? 18.0;
     this.wheelInertia = 0.5 * this.wheelMass * this.wheelRadius * this.wheelRadius;
 
-    this.mu = opts.mu ?? 1.05;
+    // Coeficiente de fricção base. 1.20 = pneu drift/competition (slick warm).
+    // Antes 1.05 era street tire — carro grudava menos e parecia "fraco" em
+    // arrancada (peak Fx = mu·N saturava em força baixa).
+    this.mu = opts.mu ?? 1.20;
     this.cornerStiffnessFront = opts.cornerStiffnessFront ?? 5.5;
     this.cornerStiffnessRear = opts.cornerStiffnessRear ?? 3.2;
     this.maxSlipAngle = opts.maxSlipAngle ?? 0.55;
@@ -21,7 +24,10 @@ export class CarConfig {
     this.maxRPM = opts.maxRPM ?? 7200;
     this.gearRatios = opts.gearRatios ?? [0, -2.9, 3.6, 2.2, 1.5, 1.1, 0.85, 0.65];
     this.diffRatio = opts.diffRatio ?? 3.8;
-    this.transEfficiency = opts.transEfficiency ?? 0.82;
+    // Eficiência de transmissão (caixa H-pattern street): 92% é o real
+    // (manuais ~92-95%, diff adicional ~94-95%). Cumulativo com diff = ~87%.
+    // Antes era 0.82 que combinado com diff 0.85 dava só 0.697 (30% perdido).
+    this.transEfficiency = opts.transEfficiency ?? 0.92;
 
     this.brakeTorqueMax = opts.brakeTorqueMax ?? 3200.0;
     this.brakeBiasFront = opts.brakeBiasFront ?? 0.62;

@@ -316,6 +316,46 @@ export class TuningUI {
         if (this.car.powertrain?.turbo) this.car.powertrain.turbo.maxBoost = v;
       });
 
+    // ----- ECU programável (tipo FuelTech) -----
+    body.appendChild(this._mkSection('ECU ▸ Shift Map (per gear)'));
+    // 1ª (idx=2) sobe pra 2ª etc. Última transição é 5ª↔6ª (idx=6).
+    const shiftPairs = [
+      { idx: 2, label: '1ª → 2ª' },
+      { idx: 3, label: '2ª → 3ª' },
+      { idx: 4, label: '3ª → 4ª' },
+      { idx: 5, label: '4ª → 5ª' },
+      { idx: 6, label: '5ª → 6ª' },
+    ];
+    for (const { idx, label } of shiftPairs) {
+      // Header linha do par
+      const hdr = document.createElement('div');
+      hdr.style.cssText = 'margin-top:10px;font-size:10px;color:#ff8fbc;letter-spacing:0.15em;';
+      hdr.textContent = label;
+      body.appendChild(hdr);
+
+      this._mkSlider(body, `up_wot_${idx}`, '  ↑ WOT (rpm)', 3000, 7200, 50, 0,
+        v => { this._setShiftMap(idx, 'upWOT', v); });
+      this._mkSlider(body, `up_cruise_${idx}`, '  ↑ Cruise (rpm)', 1500, 5500, 50, 0,
+        v => { this._setShiftMap(idx, 'upCruise', v); });
+      this._mkSlider(body, `down_wot_${idx}`, '  ↓ WOT (rpm)', 1500, 5500, 50, 0,
+        v => { this._setShiftMap(idx, 'downWOT', v); });
+      this._mkSlider(body, `down_cruise_${idx}`, '  ↓ Cruise (rpm)', 800, 4000, 50, 0,
+        v => { this._setShiftMap(idx, 'downCruise', v); });
+    }
+
+    body.appendChild(this._mkSection('ECU ▸ Anti-Hunting'));
+    this._mkSlider(body, 'ecuUpDebounce', 'Upshift Debounce (ms)', 0, 600, 10, 0,
+      v => { if (this.car.powertrain?.ecu) this.car.powertrain.ecu.upshiftDebounceMs = v; });
+    this._mkSlider(body, 'ecuDownDebounce', 'Downshift Debounce (ms)', 0, 600, 10, 0,
+      v => { if (this.car.powertrain?.ecu) this.car.powertrain.ecu.downshiftDebounceMs = v; });
+    this._mkSlider(body, 'ecuLockout', 'Anti-Hunt Lockout (ms)', 0, 1500, 50, 0,
+      v => { if (this.car.powertrain?.ecu) this.car.powertrain.ecu.antiHuntLockoutMs = v; });
+    this._mkSlider(body, 'ecuKickdownTPS', 'Kickdown TPS (%)', 50, 100, 1, 0,
+      v => { if (this.car.powertrain?.ecu) this.car.powertrain.ecu.kickdownThrottle = v / 100; });
+    this._mkSelect(body, 'ecuDriftInhibit', 'Inhibit Upshift in Drift',
+      [{ value: 'on', label: 'ON' }, { value: 'off', label: 'OFF' }],
+      v => { if (this.car.powertrain?.ecu) this.car.powertrain.ecu.inhibitUpshiftInDrift = (v === 'on'); });
+
     root.appendChild(body);
 
     // hint
@@ -454,6 +494,15 @@ export class TuningUI {
   }
 
   // ------------------------------------------------------------------
+  // ECU helpers
+  // ------------------------------------------------------------------
+  _setShiftMap(gearIdx, key, value) {
+    const ecu = this.car?.powertrain?.ecu;
+    if (!ecu?.shiftMap?.[gearIdx]) return;
+    ecu.shiftMap[gearIdx][key] = value;
+  }
+
+  // ------------------------------------------------------------------
   // Sync UI ← car
   // ------------------------------------------------------------------
   _syncFromCar() {
@@ -487,6 +536,24 @@ export class TuningUI {
     this.controls.brakeBiasFront?.set((cfg.brakeBiasFront ?? 0.62) * 100);
     if (pt?.engine) this.controls.engineInertia?.set(pt.engine.inertia ?? 0.18);
     if (pt?.turbo) this.controls.turboMaxBoost?.set(pt.turbo.maxBoost ?? 0);
+
+    // ECU sliders
+    const ecu = pt?.ecu;
+    if (ecu) {
+      for (const idx of [2, 3, 4, 5, 6]) {
+        const m = ecu.shiftMap?.[idx];
+        if (!m) continue;
+        this.controls[`up_wot_${idx}`]?.set(m.upWOT);
+        this.controls[`up_cruise_${idx}`]?.set(m.upCruise);
+        this.controls[`down_wot_${idx}`]?.set(m.downWOT);
+        this.controls[`down_cruise_${idx}`]?.set(m.downCruise);
+      }
+      this.controls.ecuUpDebounce?.set(ecu.upshiftDebounceMs ?? 180);
+      this.controls.ecuDownDebounce?.set(ecu.downshiftDebounceMs ?? 220);
+      this.controls.ecuLockout?.set(ecu.antiHuntLockoutMs ?? 700);
+      this.controls.ecuKickdownTPS?.set((ecu.kickdownThrottle ?? 0.92) * 100);
+      this.controls.ecuDriftInhibit?.set(ecu.inhibitUpshiftInDrift ? 'on' : 'off');
+    }
   }
 
   // ------------------------------------------------------------------

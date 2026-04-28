@@ -48,6 +48,46 @@ export class HUDManager {
       document.body.appendChild(ttDiv);
       this.ui.tireTemps = ttDiv;
     }
+    // Barra de progresso de troca de marcha (visível só durante isShifting).
+    // Posicionada à direita do indicador de gear, fica visível 100-300ms.
+    if (!this.ui.shiftBar) {
+      const wrap = document.createElement('div');
+      wrap.id = 'shift-bar-wrap';
+      wrap.style.cssText = 'position:absolute;bottom:118px;left:90px;width:140px;height:14px;background:rgba(0,0,0,0.45);border:1px solid #444;border-radius:3px;display:none;overflow:hidden;';
+      const fill = document.createElement('div');
+      fill.id = 'shift-bar-fill';
+      fill.style.cssText = 'height:100%;width:0%;background:linear-gradient(90deg,#ffba2a,#ff2a6d);transition:width 30ms linear;';
+      wrap.appendChild(fill);
+      const label = document.createElement('div');
+      label.id = 'shift-bar-label';
+      label.style.cssText = 'position:absolute;top:-1px;left:0;right:0;text-align:center;font-size:10px;color:#fff;font-family:monospace;text-shadow:0 0 4px #000;letter-spacing:1px;line-height:14px;';
+      wrap.appendChild(label);
+      document.body.appendChild(wrap);
+      this.ui.shiftBar = wrap;
+      this.ui.shiftBarFill = fill;
+      this.ui.shiftBarLabel = label;
+    }
+    // Flash de bloqueio de troca (overrev / bog) acima do indicador de gear.
+    if (!this.ui.shiftBlocked) {
+      const div = document.createElement('div');
+      div.id = 'shift-blocked-flash';
+      div.style.cssText = 'position:absolute;bottom:150px;left:20px;font-size:13px;font-family:monospace;font-weight:bold;letter-spacing:1px;padding:4px 8px;border-radius:3px;display:none;';
+      document.body.appendChild(div);
+      this.ui.shiftBlocked = div;
+    }
+    // RPM bar (visualização tipo tach digital). Vermelho perto do redline.
+    if (!this.ui.rpmBar) {
+      const bar = document.createElement('div');
+      bar.id = 'rpm-bar';
+      bar.style.cssText = 'position:absolute;bottom:60px;left:20px;width:240px;height:8px;background:rgba(0,0,0,0.45);border:1px solid #333;border-radius:2px;overflow:hidden;';
+      const fill = document.createElement('div');
+      fill.id = 'rpm-bar-fill';
+      fill.style.cssText = 'height:100%;width:0%;background:#4ce04c;transition:width 60ms linear, background 80ms linear;';
+      bar.appendChild(fill);
+      document.body.appendChild(bar);
+      this.ui.rpmBar = bar;
+      this.ui.rpmBarFill = fill;
+    }
   }
 
   // Cor por temperatura do pneu (mesma escala usada por gripFactor):
@@ -86,9 +126,57 @@ export class HUDManager {
       this.ui.gear.textContent = g === 1 ? 'R' : (g === 0 ? 'N' : (g - 1) + 'ª');
     }
 
+    // ----- RPM bar (verde → laranja → vermelho conforme aproxima do redline) -----
+    const pt = telem.powertrain;
+    if (this.ui.rpmBarFill && pt) {
+      const rpm = Math.max(0, telem.rpm);
+      const max = pt.engineMaxRPM ?? 7500;
+      const red = pt.engineRedlineRPM ?? 7200;
+      const pct = Math.min(100, (rpm / max) * 100);
+      this.ui.rpmBarFill.style.width = pct + '%';
+      let color;
+      if (rpm < red * 0.7)        color = '#4ce04c';   // verde (powerband)
+      else if (rpm < red * 0.92)  color = '#ffba2a';   // laranja (alto)
+      else if (rpm < red)         color = '#ff7a2a';   // laranja-vermelho (perto)
+      else                         color = '#ff2a2a';   // vermelho (redline+)
+      this.ui.rpmBarFill.style.background = color;
+    }
+
+    // ----- Barra de progresso de troca -----
+    if (this.ui.shiftBar && this.ui.shiftBarFill && this.ui.shiftBarLabel && pt) {
+      if (pt.isShifting) {
+        const prog = Math.max(0, Math.min(1, pt.shiftProgress ?? 0));
+        this.ui.shiftBar.style.display = 'block';
+        this.ui.shiftBarFill.style.width = (prog * 100) + '%';
+        const fromIdx = pt.gearIdx, toIdx = pt.targetGearIdx;
+        const fromName = fromIdx === 1 ? 'R' : (fromIdx === 0 ? 'N' : (fromIdx - 1));
+        const toName   = toIdx   === 1 ? 'R' : (toIdx   === 0 ? 'N' : (toIdx   - 1));
+        this.ui.shiftBarLabel.textContent = `${fromName} → ${toName}`;
+      } else {
+        this.ui.shiftBar.style.display = 'none';
+      }
+    }
+
+    // ----- Flash de bloqueio (overrev / bog) -----
+    if (this.ui.shiftBlocked && pt) {
+      const reason = pt.shiftBlockedReason;
+      const timer = pt.shiftBlockedTimer ?? 0;
+      if (reason && (reason === 'overrev' || reason === 'bog') && timer > 0) {
+        const isOver = reason === 'overrev';
+        this.ui.shiftBlocked.style.display = 'block';
+        this.ui.shiftBlocked.style.background = isOver ? '#7a0000' : '#3a3a00';
+        this.ui.shiftBlocked.style.color = isOver ? '#ff6060' : '#ffe04c';
+        this.ui.shiftBlocked.style.border = `1px solid ${isOver ? '#ff2a2a' : '#ffba2a'}`;
+        this.ui.shiftBlocked.textContent = isOver ? '⚠ OVER-REV' : '⚠ BOG';
+        // Fade out conforme timer decai (lastBlockedTimer começa em 0.9s).
+        this.ui.shiftBlocked.style.opacity = Math.min(1, timer / 0.4).toFixed(2);
+      } else {
+        this.ui.shiftBlocked.style.display = 'none';
+      }
+    }
+
     if (this.ui.telem && isPlaying) {
       const wd = telem.wheelData;
-      const pt = telem.powertrain;
       let slipStr = wd ?
         `FL sa:${(wd[0]?.slipAngle * 57.3).toFixed(1)}° sr:${(wd[0]?.slipRatio).toFixed(2)}\n` +
         `FR sa:${(wd[1]?.slipAngle * 57.3).toFixed(1)}° sr:${(wd[1]?.slipRatio).toFixed(2)}\n` +
@@ -101,6 +189,16 @@ export class HUDManager {
         slipStr += `LAUNCH:${pt?.launchActive ? '!!' : (pt?.launchArmed ? 'ARM' : '--')}\n`;
         slipStr += `CLUTCH:${pt?.clutchSlip?.toFixed(2)}\n`;
         slipStr += `BOX:${pt?.gearboxMode === 'sequential' ? 'SEQ' : 'H'}\n`;
+        // ECU thresholds dinâmicos (FuelTech-style)
+        if (typeof pt.ecuUpThreshold === 'number') {
+          slipStr += `ECU UP:${Math.round(pt.ecuUpThreshold)} DN:${Math.round(pt.ecuDownThreshold)}\n`;
+        }
+        if (typeof pt.drivetrainRPM === 'number') {
+          slipStr += `DRV RPM:${Math.round(pt.drivetrainRPM)}\n`;
+        }
+        if (pt.ecuInhibitReason) {
+          slipStr += `INHIBIT: ${pt.ecuInhibitReason.toUpperCase()}\n`;
+        }
       }
       this.ui.telem.textContent = slipStr;
     }

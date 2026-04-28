@@ -17,16 +17,20 @@
 
 export class Engine {
   constructor(opts = {}) {
-    // Curva de torque (pares rpm→torque para interpolação)
+    // Curva de torque turbo 1.8L tunado (~390cv @ 6000 com boost ~0.8 bar).
+    // Característica turbo: subida rápida do torque com o boost (1500-3500),
+    // PLATEAU sustentado de peak torque entre 3500-4500 (limite mecânico do turbo),
+    // depois cai gradualmente — peak power perto de 5500-6000.
+    // Antes a curva caía cedo demais (NA-like) e o carro perdia força acima de 4500.
     this.torqueCurve = opts.torqueCurve ?? [
-      { r: 900,  t: 220 },
-      { r: 1500, t: 310 },
-      { r: 2500, t: 420 },
-      { r: 3500, t: 480 },
-      { r: 4500, t: 460 },
-      { r: 5500, t: 430 },
-      { r: 6500, t: 380 },
-      { r: 7200, t: 320 },
+      { r: 900,  t: 250 },
+      { r: 1500, t: 360 },
+      { r: 2500, t: 480 },
+      { r: 3500, t: 540 },   // peak torque
+      { r: 4500, t: 540 },   // plateau (turbo limit)
+      { r: 5500, t: 510 },   // peak power (~390 cv)
+      { r: 6500, t: 450 },
+      { r: 7200, t: 380 },
     ];
 
     this.idleRPM        = opts.idleRPM        ?? 900;
@@ -38,15 +42,19 @@ export class Engine {
     // Inércia rotacional do motor em kg·m²
     this.inertia        = opts.inertia        ?? 0.18;
 
-    // Curvas de fricção interna (3 componentes)
-    // frictionTorque = passive + linear*w + quadratic*w²
-    this.frictionPassive    = opts.frictionPassive    ?? 15.0;
-    this.frictionLinear     = opts.frictionLinear     ?? 0.008;
-    this.frictionQuadratic  = opts.frictionQuadratic  ?? 1.2e-5;
+    // Curvas de fricção interna (3 componentes).
+    // frictionTorque = passive + linear*w + quadratic*w². Defaults turbo
+    // tunado: passive 14, linear 0.010, quadratic 1.4e-5 — somam ~35Nm em
+    // 7000rpm. Antes (22+0.014w+2e-5w²) somavam ~50Nm e o topo da potência
+    // sumia.
+    this.frictionPassive    = opts.frictionPassive    ?? 14.0;
+    this.frictionLinear     = opts.frictionLinear     ?? 0.010;
+    this.frictionQuadratic  = opts.frictionQuadratic  ?? 1.4e-5;
 
     // Coast torque (engine braking quando solta o acelerador, proporcional ao RPM).
-    // Em Nm @ redline. Aplicado adicionalmente à fricção quando throttle < 0.05.
-    this.coastTorque        = opts.coastTorque        ?? 60.0;
+    // Em Nm @ redline. Refs: motor 2.0L NA real ~150-220 Nm de freio motor @ redline,
+    // turbo de série ~120-180 (válvulas mais leves). Aplicado quando throttle < 0.05.
+    this.coastTorque        = opts.coastTorque        ?? 180.0;
 
     // Idle control
     this.idleMode       = opts.idleMode       ?? 'active';  // 'active'|'passive'
@@ -97,67 +105,60 @@ export class Engine {
     return -this.coastTorque * (rpm / this.redlineRPM);
   }
 
-  // Estado livre (neutro, embreagem aberta, ou slip)
-  updateFree(dt, clutchTransmitTorque = 0, externalLoadTorque = 0) {
+  // Estado livre (neutro, embreagem aberta, ou slip).
+  // turboMult: multiplicador de boost a aplicar SOBRE o torque da curva
+  //   (1.0 = sem turbo; 1.8 = +0.8 bar). Mantém a integração da omega coerente
+  //   com o torque que efetivamente sai do motor (cilindros + turbina).
+  updateFree(dt, clutchTransmitTorque = 0, externalLoadTorque = 0, turboMult = 1.0) {
     if (!this.isRunning) {
       if (this.isStalled) this.rpm = 0;
       return 0;
     }
 
     const w = this.angularVel;
-    const rawTorque = this.getTorqueAt(this.rpm);
+    const rawTorque = this.getTorqueAt(this.rpm) * turboMult;
     const friction = this.getFrictionTorque(w);
 
-    // Coast (engine braking) — só aplicado off-throttle e acima do idle
     let coast = 0;
     if (this.throttlePos < 0.05 && this.rpm > this.idleRPM) {
       coast = this.getCoastTorque(this.rpm);   // negativo
     }
 
-    // Idle control ativo
     let idleCorrection = 0;
     if (this.rpm < this.idleRPM + 200) {
       idleCorrection = (this.idleRPM - this.rpm) * this.idleGain;
     }
 
     const netTorque = rawTorque - friction + coast - clutchTransmitTorque + idleCorrection;
-    // semi-implicit Euler: v += a·dt (depois rpm é derivado de v).
     this.angularVel += (netTorque / this.inertia) * dt;
     this.rpm = this.omegaToRPM(this.angularVel);
 
-    // Rev limiter
     this._applyRevLimiter();
 
-    // Stall check
     if (this.canStall && this.rpm < this.stallRPM && !this._clutchEngaged) {
-      // Se a embreagem estiver engatada E rpm cair demais → stall
-      // _clutchEngaged é setado externamente pelo PowertrainSystem
+      // Stall handling externo (PowertrainSystem)
     }
 
-    // Clamp mínimo
     if (this.rpm < 0) { this.rpm = 0; this.angularVel = 0; }
 
-    return rawTorque;  // torque bruto produzido
+    return rawTorque;  // torque bruto produzido (com boost)
   }
 
-  // Estado acoplado (locked ao drivetrain)
-  updateLocked(dt, drivetrainOmega, clutchTransmitTorque) {
+  // Estado acoplado (locked ao drivetrain). turboMult aplicado ao raw da curva.
+  updateLocked(dt, drivetrainOmega, clutchTransmitTorque, turboMult = 1.0) {
     if (!this.isRunning) return 0;
 
-    // RPM é imposto pela velocidade do drivetrain
     this.angularVel = drivetrainOmega;
     this.rpm = this.omegaToRPM(drivetrainOmega);
 
-    const rawTorque = this.getTorqueAt(this.rpm);
+    const rawTorque = this.getTorqueAt(this.rpm) * turboMult;
     const friction = this.getFrictionTorque(this.angularVel);
 
-    // Coast (engine braking): só off-throttle E acima do idle
     let coast = 0;
     if (this.throttlePos < 0.05 && this.rpm > this.idleRPM) {
       coast = this.getCoastTorque(this.rpm);  // negativo
     }
 
-    // Idle correction se necessário
     let idleCorrection = 0;
     if (this.rpm < this.idleRPM + 100 && this.throttlePos < 0.05) {
       idleCorrection = (this.idleRPM - this.rpm) * this.idleGain;
@@ -168,7 +169,7 @@ export class Engine {
     this._applyRevLimiter();
     if (this.rpm < 0) { this.rpm = 0; this.angularVel = 0; }
 
-    return netTorque;  // torque que sobra para acelerar o drivetrain
+    return netTorque;  // torque líquido (com boost) — vai pro drivetrain
   }
 
   _interpolateTorque(rpm) {
@@ -344,14 +345,42 @@ export class Gearbox {
 
     // Shift map dinâmico
     this.upshiftBaseRPM   = opts.upshiftBaseRPM   ?? 4000;
-    this.upshiftRedline   = opts.upshiftRedline   ?? 7000;
-    this.downshiftBaseRPM = opts.downshiftBaseRPM ?? 2000;
-    this.downshiftPower   = opts.downshiftPower   ?? 4500;
+    this.upshiftRedline   = opts.upshiftRedline   ?? 6800;
+    this.downshiftBaseRPM = opts.downshiftBaseRPM ?? 1800;
+    this.downshiftPower   = opts.downshiftPower   ?? 4200;
     this.reverseLockSpeed = opts.reverseLockSpeed ?? 1.0;  // m/s
 
-    // Cache para rev-match
+    // Cache para rev-match e gating
     this._lastWheelOmega = 0;
     this._finalDrive = opts.finalDrive ?? 3.8;
+
+    // Limites de RPM pra gating (setados externamente pelo PowertrainSystem
+    // a partir do Engine; deixa um default razoável caso seja usado isolado).
+    this.engineMaxRPM = opts.engineMaxRPM ?? 7500;
+    this.engineRedlineRPM = opts.engineRedlineRPM ?? 7200;
+    this.engineIdleRPM = opts.engineIdleRPM ?? 900;
+
+    // Gating thresholds (vêm do PHYSICS_CFG via PowertrainSystem).
+    this.overrevMarginRPM     = opts.overrevMarginRPM     ?? 250;
+    this.minRPMAfterUpshift   = opts.minRPMAfterUpshift   ?? 1700;
+    this.minPostUpshiftRPM    = opts.minPostUpshiftRPM    ?? 2400;
+
+    // Estado pra HUD: motivo do último shift recusado + timer de exibição.
+    this.lastBlockedReason = null;       // 'overrev' | 'bog' | 'cooldown' | null
+    this.lastBlockedTimer = 0;
+  }
+
+  // RPM previsto se entrássemos numa marcha específica AGORA.
+  // wheelOmega: rad/s na roda traseira média.
+  projectedRPMInGear(gearIdx, wheelOmega = this._lastWheelOmega, finalDrive = this._finalDrive) {
+    const ratio = this.gearRatios[gearIdx] ?? 0;
+    if (Math.abs(ratio) < 0.01) return 0;
+    return Math.abs(wheelOmega) * Math.abs(ratio) * finalDrive * 30 / Math.PI;
+  }
+
+  _flagBlocked(reason) {
+    this.lastBlockedReason = reason;
+    this.lastBlockedTimer = 0.9;  // 900 ms de exibição na HUD
   }
 
   setMode(mode) {
@@ -376,25 +405,63 @@ export class Gearbox {
     return (engineRPM * Math.PI / 30) / (Math.abs(ratio) * finalDrive);
   }
 
-  shiftUp() {
-    if (this.isShifting || this.currentGear >= this.gearRatios.length - 1) return false;
-    this.targetGear = this.currentGear + 1;
+  // Gating realista (Forza/AC). Retorna `true` se o shift foi aceito,
+  // `false` (com lastBlockedReason setado) caso contrário.
+  // `force` ignora gating de RPM mas mantém limites estruturais (range / cooldown).
+  shiftUp(force = false) {
+    if (this.isShifting) { this._flagBlocked('cooldown'); return false; }
+    if (this.shiftCooldown > 0) { this._flagBlocked('cooldown'); return false; }
+    if (this.currentGear >= this.gearRatios.length - 1) return false;
+
+    const next = this.currentGear + 1;
+
+    if (!force && this.currentGear >= 2) {
+      // Bog protection: se o RPM previsto na próxima marcha for absurdamente baixo,
+      // e estamos em movimento (wheelOmega não desprezível), recusa.
+      // Em standstill (wheelOmega ≈ 0) não bloqueia — driver pode estar
+      // pré-selecionando 2ª/3ª no clutch para um launch.
+      const wheelOmegaAbs = Math.abs(this._lastWheelOmega);
+      if (wheelOmegaAbs > 1.0) {
+        const projected = this.projectedRPMInGear(next, this._lastWheelOmega, this._finalDrive);
+        if (projected < this.engineIdleRPM * 0.85) {
+          this._flagBlocked('bog');
+          return false;
+        }
+      }
+    }
+
+    this.targetGear = next;
     this._startShift();
     return true;
   }
 
-  shiftDown() {
-    if (this.isShifting || this.currentGear <= 1) return false;
-    this.targetGear = this.currentGear - 1;
+  shiftDown(force = false) {
+    if (this.isShifting) { this._flagBlocked('cooldown'); return false; }
+    if (this.shiftCooldown > 0) { this._flagBlocked('cooldown'); return false; }
+    if (this.currentGear <= 1) return false;
+
+    const prev = this.currentGear - 1;
+
+    if (!force && prev >= 2) {
+      // Over-rev protection: se o RPM previsto na nova (menor) marcha estourar
+      // o engineMaxRPM, recusa o shift. Margem permite blip + tolerância.
+      const projected = this.projectedRPMInGear(prev, this._lastWheelOmega, this._finalDrive);
+      if (projected > this.engineMaxRPM + this.overrevMarginRPM) {
+        this._flagBlocked('overrev');
+        return false;
+      }
+    }
+
+    this.targetGear = prev;
 
     // Rev-match em downshift sequencial: calcula RPM esperado na nova marcha
     // e arma um blip de 100ms para o PowertrainSystem aplicar.
     if (this.mode === 'sequential') {
       const newRatio = this.gearRatios[this.targetGear] ?? 0;
       if (Math.abs(newRatio) > 0.01) {
-        const wheelOmega = this._lastWheelOmega;
-        const targetEngineRPM = Math.abs(wheelOmega) * Math.abs(newRatio) * this._finalDrive * 30 / Math.PI;
-        this.pendingEngineBlipRPM = targetEngineRPM;
+        const targetEngineRPM = Math.abs(this._lastWheelOmega) * Math.abs(newRatio) * this._finalDrive * 30 / Math.PI;
+        // Clamp ao redline pra blip nunca empurrar acima do limit (gating já filtrou).
+        this.pendingEngineBlipRPM = Math.min(targetEngineRPM, this.engineRedlineRPM);
         this.pendingBlipTimer = 0.1;  // 100 ms de blip ativo
       }
     }
@@ -422,10 +489,18 @@ export class Gearbox {
     this.shiftTimer = this.shiftTime;
   }
 
-  update(dt, engineRPM, throttleInput, avgRearWheelOmega, finalDrive, handbrakeInput) {
+  // Auto-shift agora é DELEGADO para a ECU (PowertrainSystem chama `ecu.decide`
+  // e injeta o resultado via `_autoShiftCommand` antes de `Gearbox.update`).
+  // Esta função cuida só de timers de shift (timer/cooldown) + execução do
+  // comando recebido. A lógica de quando subir/descer mora na ECU.
+  update(dt, _engineRPM, _throttleInput, avgRearWheelOmega, finalDrive, _handbrakeInput, _clutchSlipping = false) {
     if (this.shiftCooldown > 0) this.shiftCooldown -= dt;
+    if (this.lastBlockedTimer > 0) {
+      this.lastBlockedTimer -= dt;
+      if (this.lastBlockedTimer <= 0) this.lastBlockedReason = null;
+    }
 
-    // Cache para rev-match em downshift
+    // Cache para rev-match em downshift e gating de RPM previsto
     this._lastWheelOmega = avgRearWheelOmega;
     this._finalDrive = finalDrive;
 
@@ -443,28 +518,41 @@ export class Gearbox {
       if (this.shiftTimer <= 0) {
         this.currentGear = this.targetGear;
         this.isShifting = false;
-        this.shiftCooldown = (this.mode === 'sequential') ? 0.04 : 0.15;
+        // Cooldown CURTO — debounce/lockout da ECU já protegem contra hunting.
+        // Cooldown aqui só evita que dois comandos sejam executados no mesmo
+        // sub-step (limite estrutural).
+        this.shiftCooldown = (this.mode === 'sequential')
+          ? this._cooldownSeq : this._cooldownH;
       }
       return;  // durante troca: gearRatio = 0
     }
 
-    // Auto-shift
-    if (this.autoShift && this.shiftCooldown <= 0 && this.currentGear >= 2) {
-      const load = Math.max(0, throttleInput);
-      const upshiftRPM = this.upshiftBaseRPM + load * (this.upshiftRedline - this.upshiftBaseRPM);
-      const downshiftRPM = this.downshiftBaseRPM + load * (this.downshiftPower - this.downshiftBaseRPM);
-
-      // Drift kickdown
-      const kickdownRPM = 4000;
-
-      if (engineRPM > upshiftRPM && this.currentGear < this.gearRatios.length - 1) {
+    // Comando da ECU (setado via `setAutoShiftCommand` antes deste update).
+    if (this.autoShift && this.shiftCooldown <= 0 && this._autoShiftCommand) {
+      if (this._autoShiftCommand === 'up') {
         this.shiftUp();
-      } else if (engineRPM < downshiftRPM && this.currentGear > 2) {
-        this.shiftDown();
-      } else if (handbrakeInput > 0 && engineRPM < kickdownRPM && this.currentGear > 2) {
+      } else if (this._autoShiftCommand === 'down') {
         this.shiftDown();
       }
+      this._autoShiftCommand = null;
     }
+  }
+
+  // Recebe a decisão da ECU. Limpa após processar no próximo update.
+  setAutoShiftCommand(cmd) {
+    this._autoShiftCommand = cmd;
+  }
+
+  // Cache mutável dos cooldowns (PowertrainSystem injeta a partir de PHYSICS_CFG)
+  get _cooldownH() { return this._cdH ?? 0.55; }
+  set _cooldownH(v) { this._cdH = v; }
+  get _cooldownSeq() { return this._cdSeq ?? 0.18; }
+  set _cooldownSeq(v) { this._cdSeq = v; }
+
+  // Progresso da troca (0 = recém começou, 1 = completa). 0 quando idle.
+  get shiftProgress() {
+    if (!this.isShifting || this.shiftTime <= 0) return 0;
+    return Math.max(0, Math.min(1, 1 - this.shiftTimer / this.shiftTime));
   }
 
   getGearName() {
@@ -515,7 +603,10 @@ export class Differential {
     this.type = type;  // 'open'|'welded'|'lsd_clutch'|'torsen'
 
     this.finalDrive = opts.finalDrive ?? 3.8;
-    this.efficiency = opts.efficiency ?? 0.85;
+    // Eficiência mecânica do diff (rolamentos + atrito interno). Real ~0.94-0.96.
+    // Antes 0.85 era pessimista demais (combinado com transEfficiency 0.82
+    // dava 0.697, perdendo 30% do torque do motor — carro ficava "fraco").
+    this.efficiency = opts.efficiency ?? 0.95;
 
     // ---- Salisbury / clutch-pack (lsd_clutch)
     // Defaults TUNADOS PRA DRIFT (eram 50 / 0.4 / 0.15):
@@ -785,6 +876,198 @@ export class Turbocharger {
 
 
 // ========================================================================
+// ECU — Central de Injeção Programável (estilo FuelTech FT450/600)
+// ========================================================================
+//
+// Decide quando subir/descer marcha lendo:
+//   - drivetrainRPM (RPM virtual da roda — sinal MAIS confiável que engineRPM
+//     pois evita "decolagem" em arrancada/burnout)
+//   - throttle position (TPS), 0..1
+//   - rear slip angle (rad) — pra inibir upshift em drift sustentado
+//
+// Tabela: por marcha atual N, define `upWOT/upCruise/downWOT/downCruise`.
+// Em throttle parcial, faz lerp linear (igual TCUs reais — que internamente
+// armazenam a tabela 2D RPM × TPS interpolada do mesmo jeito).
+//
+// Defesas anti-hunting:
+//   - Debounce temporal: o threshold tem que ficar excedido por X ms antes
+//     de aceitar a troca (filtra picos de RPM em transientes pós-shift).
+//   - Anti-hunt lockout: pós-shift, downshift fica bloqueado por Y ms a menos
+//     que sigRPM colapse abaixo de `down × 0.85` (kickdown / freada forte).
+//   - Drift inhibit: upshift bloqueado se rear slip angle > threshold por Z ms.
+//   - Kickdown: throttle > 92% + sigRPM baixo força downshift ignorando lockout.
+//
+// Refs:
+//   - Patente Chrysler US5669850A (Shift Hunting Prevention)
+//   - MegaShift / EFILive shift table tuning (hysteresis 400-600 RPM mínima)
+//   - FuelTech FTManager — shift cut, shift delay, shift dwell
+// ========================================================================
+
+export class ECU {
+  constructor(opts = {}) {
+    // Shift map. Chave = currentGear (índice no array gearRatios: 2=1ª, 3=2ª, ...).
+    // Cada entrada controla a transição PARA a próxima marcha, e o downshift
+    // PARA voltar à atual quando estamos uma acima.
+    //
+    // Defaults calibrados pra motor 1.8L turbo @ redline 7200, peak power 5500.
+    // Garantem margem de hunting ≥ 440 RPM em WOT (ver PESQUISA_SHIFT_LOGIC_REAL.md).
+    this.shiftMap = opts.shiftMap ?? {
+      2: { upWOT: 6500, upCruise: 3000, downWOT: 3500, downCruise: 1700 },  // 1ª↔2ª
+      3: { upWOT: 6300, upCruise: 2800, downWOT: 3700, downCruise: 1700 },  // 2ª↔3ª
+      4: { upWOT: 6200, upCruise: 2600, downWOT: 3900, downCruise: 1700 },  // 3ª↔4ª
+      5: { upWOT: 6000, upCruise: 2400, downWOT: 4000, downCruise: 1700 },  // 4ª↔5ª
+      6: { upWOT: 5800, upCruise: 2200, downWOT: 4000, downCruise: 1700 },  // 5ª↔6ª
+    };
+
+    // Janelas temporais (ms → s internamente)
+    this.upshiftDebounceMs   = opts.upshiftDebounceMs   ?? 180;
+    this.downshiftDebounceMs = opts.downshiftDebounceMs ?? 220;
+    this.antiHuntLockoutMs   = opts.antiHuntLockoutMs   ?? 700;
+    this.driftDwellMs        = opts.driftDwellMs        ?? 300;
+
+    // Kickdown
+    this.kickdownThrottle = opts.kickdownThrottle ?? 0.92;  // TPS pra ativar kickdown
+    this.kickdownRPMRatio = opts.kickdownRPMRatio ?? 1.30;  // sigRPM < down·1.3 → desce
+
+    // Drift inhibit
+    this.inhibitUpshiftInDrift = opts.inhibitUpshiftInDrift ?? true;
+    this.driftSlipThreshold    = opts.driftSlipThreshold    ?? 0.25;  // rad
+
+    // Estado interno (s)
+    this._upTimer    = 0;
+    this._downTimer  = 0;
+    this._lockoutTimer = 0;
+    this._driftTimer = 0;
+    this._lastDir    = 0;   // -1 = down, +1 = up, 0 = idle
+
+    // Telemetria (HUD): última decisão e thresholds dinâmicos resolvidos.
+    this.lastUpThreshold   = 0;
+    this.lastDownThreshold = 0;
+    this.lastDecision = null;     // 'up' | 'down' | null
+    this.lastInhibitReason = null; // 'drift' | 'lockout' | 'debounce' | null
+  }
+
+  // Resolve thresholds ativos para a marcha atual e throttle.
+  resolveThresholds(currentGear, throttle) {
+    const map = this.shiftMap[currentGear];
+    if (!map) return { up: Infinity, down: 0 };
+    const t = Math.max(0, Math.min(1, throttle));
+    const up   = map.upCruise   + t * (map.upWOT   - map.upCruise);
+    const down = map.downCruise + t * (map.downWOT - map.downCruise);
+    return { up, down };
+  }
+
+  // Avalia uma vez por sub-step. Retorna 'up' | 'down' | null.
+  // ctx: { throttle, drivetrainRPM, currentGear, isShifting, rearSlipAngle, handbrake }
+  decide(dt, ctx) {
+    const { throttle, drivetrainRPM, currentGear, isShifting, rearSlipAngle, handbrake } = ctx;
+
+    // Decai lockout sempre
+    if (this._lockoutTimer > 0) this._lockoutTimer = Math.max(0, this._lockoutTimer - dt);
+
+    // Drift dwell (acumula tempo em slip alto)
+    const slipAbs = Math.abs(rearSlipAngle ?? 0);
+    if (slipAbs > this.driftSlipThreshold) {
+      this._driftTimer = Math.min(this.driftDwellMs / 1000 * 2, this._driftTimer + dt);
+    } else {
+      this._driftTimer = Math.max(0, this._driftTimer - dt * 2);
+    }
+    const driftSustained = this._driftTimer >= this.driftDwellMs / 1000;
+
+    this.lastDecision = null;
+    this.lastInhibitReason = null;
+
+    if (isShifting || currentGear < 2) {
+      this._upTimer = 0;
+      this._downTimer = 0;
+      return null;
+    }
+
+    const { up, down } = this.resolveThresholds(currentGear, throttle);
+    this.lastUpThreshold = up;
+    this.lastDownThreshold = down;
+
+    const sig = drivetrainRPM;
+
+    // -------------- UPSHIFT --------------
+    if (sig > up) {
+      this._upTimer += dt;
+      this._downTimer = 0;
+      const dwellOK = this._upTimer >= this.upshiftDebounceMs / 1000;
+      const driftOK = !(this.inhibitUpshiftInDrift && driftSustained);
+      if (!dwellOK) {
+        this.lastInhibitReason = 'debounce';
+      } else if (!driftOK) {
+        this.lastInhibitReason = 'drift';
+      } else {
+        this._upTimer = 0;
+        this._lastDir = 1;
+        this._lockoutTimer = this.antiHuntLockoutMs / 1000;
+        this.lastDecision = 'up';
+        return 'up';
+      }
+    } else {
+      this._upTimer = 0;
+    }
+
+    // -------------- KICKDOWN (override do lockout) --------------
+    if (
+      throttle > this.kickdownThrottle &&
+      sig < down * this.kickdownRPMRatio &&
+      currentGear > 2
+    ) {
+      this._downTimer = 0;
+      this._lastDir = -1;
+      this._lockoutTimer = this.antiHuntLockoutMs / 1000;
+      this.lastDecision = 'down';
+      return 'down';
+    }
+
+    // -------------- DOWNSHIFT --------------
+    if (sig < down && currentGear > 2) {
+      this._downTimer += dt;
+      this._upTimer = 0;
+      const dwellOK = this._downTimer >= this.downshiftDebounceMs / 1000;
+      const lockoutOK = this._lockoutTimer <= 0 || sig < down * 0.85;
+      if (!dwellOK) {
+        this.lastInhibitReason = 'debounce';
+      } else if (!lockoutOK) {
+        this.lastInhibitReason = 'lockout';
+      } else {
+        this._downTimer = 0;
+        this._lastDir = -1;
+        this._lockoutTimer = this.antiHuntLockoutMs / 1000;
+        this.lastDecision = 'down';
+        return 'down';
+      }
+    } else {
+      this._downTimer = 0;
+    }
+
+    // -------------- HANDBRAKE KICKDOWN (drift) --------------
+    if (handbrake > 0 && sig < 4000 && currentGear > 2 && this._lockoutTimer <= 0) {
+      this._lastDir = -1;
+      this._lockoutTimer = this.antiHuntLockoutMs / 1000;
+      this.lastDecision = 'down';
+      return 'down';
+    }
+
+    return null;
+  }
+
+  reset() {
+    this._upTimer = 0;
+    this._downTimer = 0;
+    this._lockoutTimer = 0;
+    this._driftTimer = 0;
+    this._lastDir = 0;
+    this.lastDecision = null;
+    this.lastInhibitReason = null;
+  }
+}
+
+
+// ========================================================================
 // POWERTRAIN SYSTEM (Coordinator)
 // ========================================================================
 
@@ -797,14 +1080,40 @@ export class PowertrainSystem {
     this.tc = new TractionControl(opts.tractionControl);
     this.launch = new LaunchControl(opts.launchControl);
     this.turbo = opts.turbo ? new Turbocharger(opts.turbo) : null;
+    // ECU programável (FuelTech-style). Decide auto-shift via shift map 2D.
+    this.ecu = new ECU(opts.ecu);
 
     // Parâmetros globais
     this.finalDrive = opts.finalDrive ?? 3.8;
-    this.transEfficiency = opts.transEfficiency ?? 0.82;
+    // Eficiência da transmissão (caixa). Combinada com diff (0.95) → ~0.87
+    // total. Antes era 0.82, somando 0.697 — fuga de potência grande.
+    this.transEfficiency = opts.transEfficiency ?? 0.92;
+
+    // Propaga limites de RPM do engine pro gearbox (gating de over-rev/bog).
+    this._syncEngineLimitsToGearbox();
+
+    // Permite override de cooldowns/thresholds via opts.shifting:{...}
+    if (opts.shifting) {
+      const s = opts.shifting;
+      if (typeof s.cooldownH === 'number')           this.gearbox._cooldownH = s.cooldownH;
+      if (typeof s.cooldownSeq === 'number')         this.gearbox._cooldownSeq = s.cooldownSeq;
+      if (typeof s.overrevMarginRPM === 'number')    this.gearbox.overrevMarginRPM = s.overrevMarginRPM;
+      if (typeof s.minRPMAfterUpshift === 'number')  this.gearbox.minRPMAfterUpshift = s.minRPMAfterUpshift;
+      if (typeof s.minPostUpshiftRPM === 'number')   this.gearbox.minPostUpshiftRPM = s.minPostUpshiftRPM;
+    }
 
     // Estado interno
     this.drivetrainOmega = 0;
     this.lastWheelOmegas = [0, 0, 0, 0];
+  }
+
+  // Mantém o gearbox sabendo o redline/idle/maxRPM atuais (chamado no construtor
+  // e quando o engine recebe novos limites via tuning).
+  _syncEngineLimitsToGearbox() {
+    if (!this.gearbox || !this.engine) return;
+    this.gearbox.engineMaxRPM     = this.engine.maxRPM;
+    this.gearbox.engineRedlineRPM = this.engine.redlineRPM;
+    this.gearbox.engineIdleRPM    = this.engine.idleRPM;
   }
 
   // ---------------------------------------------------------------
@@ -837,47 +1146,74 @@ export class PowertrainSystem {
     const drivetrainRPM = this.gearbox.getDrivetrainRPM(avgRearOmega, this.finalDrive);
     this.drivetrainOmega = avgRearOmega;
 
-    // 4. Gearbox update (auto-shift)
+    // 4a. ECU decide auto-shift baseado em shift map 2D + debounce + lockout.
+    //     Sinal usado é SEMPRE drivetrainRPM (RPM virtual da roda) — evita
+    //     o "decolar" do engineRPM em slip e elimina hunting.
+    //     Slip angle do eixo traseiro alimenta a inibição em drift sustentado.
+    const rearSlipAngleAvg = ((wRL.slipAngle ?? 0) + (wRR.slipAngle ?? 0)) * 0.5;
+    const ecuCmd = this.ecu.decide(dt, {
+      throttle,
+      drivetrainRPM,
+      currentGear: this.gearbox.currentGear,
+      isShifting: this.gearbox.isShifting,
+      rearSlipAngle: rearSlipAngleAvg,
+      handbrake,
+    });
+    this.gearbox.setAutoShiftCommand(ecuCmd);
+
+    // 4b. Gearbox executa o comando da ECU (se houver) + tica timers.
     this.gearbox.update(dt, this.engine.rpm, throttle, avgRearOmega, this.finalDrive, handbrake);
 
     // 5. Launch control
     this.launch.update(clutchPedal, throttle, speedMS, this.engine.rpm);
 
-    // 6. Determinar estado do clutch (Karnopp tanh model)
+    // 6a. Turbo ANTES do clutch (ordem física correta).
+    // O turbo modifica o torque produzido pelo motor; o clutch transmite esse
+    // torque já boosteado. Antes o turbo era multiplicado APÓS o clutch,
+    // o que: (a) deixava o engine.angularVel ser integrado sem ver o boost
+    // (motor desacelerava demais ao acoplar), (b) mascarava qualquer cap
+    // do clutch (clutch via só raw, ignorando o pico de boost).
+    let turboMult = 1.0;
+    if (this.turbo) {
+      this.turbo.update(dt, this.engine.rpm, throttle);
+      turboMult = this.turbo.getTorqueMultiplier();
+    }
+
+    // 6b. Determinar estado do clutch (Karnopp tanh model)
     // Δω = engineOmega - drivetrainOmega·gearRatio·finalDrive (em rad/s).
     const ptGearRatio = this.gearbox.getGearRatio();
     const drivetrainSideOmega = avgRearOmega * ptGearRatio * this.finalDrive;
     const deltaOmega = this.engine.angularVel - drivetrainSideOmega;
-    const engineRawTorque = this.engine.getTorqueAt(this.engine.rpm, throttle);
+    // engineRawTorque agora INCLUI o boost — é o torque real saindo do motor.
+    const engineRawTorque = this.engine.getTorqueAt(this.engine.rpm, throttle) * turboMult;
 
     let transmittedTorque = 0;
 
     if (this.gearbox.isShifting || ptGearRatio === 0) {
-      // Neutro ou trocando: ignição cortada (já é gearRatio=0). No sequential,
-      // explicitamos que torque transmitido = 0 (ignition cut).
+      // Neutro ou trocando: ignição cortada. Engine livre.
       transmittedTorque = 0;
       this.engine.updateFree(dt, 0, 0);
       this.clutch.isSlipping = false;
 
     } else if (Math.abs(deltaOmega) < 0.5 && this.clutch.isEngaged() && Math.abs(avgRearOmega) > 0.5) {
-      // STICK (Δω≈0 e clutch fechado e movendo): motor + drivetrain acoplados.
-      // Sincroniza engine ao drivetrain.
+      // STICK: motor acoplado. Aplica boost ao raw da curva e usa esse torque
+      // como base do net (raw·boost − fricção + coast). Sem isso o motor
+      // "perdia" o boost ao acoplar e ficava sem força em alta carga.
       this.engine.angularVel = drivetrainSideOmega;
       this.engine.rpm = this.engine.omegaToRPM(this.engine.angularVel);
 
-      transmittedTorque = this.engine.updateLocked(dt, this.engine.angularVel, 0);
-      // Para HUD: stick zone — sem slip percebido
+      transmittedTorque = this.engine.updateLocked(dt, this.engine.angularVel, 0, turboMult);
       this.clutch.isSlipping = false;
       this.clutch.temperature *= 0.95;
 
     } else {
-      // SLIP ou parado: torque transmitido via Karnopp (tanh smooth)
+      // SLIP ou parado: torque transmitido via Karnopp (tanh smooth).
+      // engineRawTorque já inclui boost — o clutch enxerga o torque real.
       transmittedTorque = this.clutch.getTransmittingTorque(engineRawTorque, deltaOmega);
-      this.engine.updateFree(dt, transmittedTorque, 0);
+      this.engine.updateFree(dt, transmittedTorque, 0, turboMult);
     }
 
-    // Rev-match blip (sequencial): força engine.rpm pra cima durante 100ms
-    // após um downshift, simulando throttle blip automático.
+    // Rev-match blip (sequencial)
     if (this.gearbox.pendingBlipTimer > 0 && this.gearbox.pendingEngineBlipRPM > 0) {
       if (this.engine.rpm < this.gearbox.pendingEngineBlipRPM) {
         this.engine.rpm = this.gearbox.pendingEngineBlipRPM;
@@ -895,18 +1231,11 @@ export class PowertrainSystem {
       this.engine.rpm = this.launch.limitRPM(this.engine.rpm);
       this.engine.angularVel = this.engine.rpmToOmega(this.engine.rpm);
       if (this.launch.shouldCut(this.engine.rpm)) {
-        // Corte: ignição cortada → torque cai
         transmittedTorque *= 0.1;
       }
     }
 
-    // 9. Turbo
-    let turboMult = 1.0;
-    if (this.turbo) {
-      this.turbo.update(dt, this.engine.rpm, throttle);
-      turboMult = this.turbo.getTorqueMultiplier();
-      transmittedTorque *= turboMult;
-    }
+    // 9. (turbo já aplicado em 6a — antes do clutch).
 
     // 10. Gearbox ratio → total torque after diff
     const gearRatio = this.gearbox.getGearRatio();
@@ -931,8 +1260,15 @@ export class PowertrainSystem {
       },
       // HUD / telemetry
       rpm: this.engine.rpm,
+      drivetrainRPM,
       gear: this.gearbox.getGearName(),
+      gearIdx: this.gearbox.currentGear,
+      targetGearIdx: this.gearbox.targetGear,
       isShifting: this.gearbox.isShifting,
+      shiftProgress: this.gearbox.shiftProgress,
+      shiftTime: this.gearbox.shiftTime,
+      shiftBlockedReason: this.gearbox.lastBlockedReason,
+      shiftBlockedTimer: this.gearbox.lastBlockedTimer,
       gearboxMode: this.gearbox.mode,
       clutchSlip: this.clutch.isSlipping ? this.clutch.getSlipPercentage(this.engine.rpm, drivetrainRPM) : 0,
       tcActive: this.tc.active,
@@ -943,6 +1279,15 @@ export class PowertrainSystem {
       turboSpooling: this.turbo ? this.turbo.isSpooling : false,
       clutchTemp: this.clutch.temperature,
       clutchWear: this.clutch.wear,
+      // Engine limits — HUD usa pra colorir RPM gauge perto do redline.
+      engineRedlineRPM: this.engine.redlineRPM,
+      engineMaxRPM: this.engine.maxRPM,
+      engineIdleRPM: this.engine.idleRPM,
+      // ECU telemetria (HUD: linha UP@xxxx | DOWN@xxxx + razão de inibição).
+      ecuUpThreshold:    this.ecu.lastUpThreshold,
+      ecuDownThreshold:  this.ecu.lastDownThreshold,
+      ecuLastDecision:   this.ecu.lastDecision,
+      ecuInhibitReason:  this.ecu.lastInhibitReason,
     };
   }
 
@@ -960,6 +1305,9 @@ export class PowertrainSystem {
     this.gearbox.currentGear = 2;
     this.gearbox.targetGear = 2;
     this.gearbox.isShifting = false;
+    this.gearbox.shiftCooldown = 0;
+    this.gearbox._autoShiftCommand = null;
+    if (this.ecu) this.ecu.reset();
     this.tc.active = false;
     this.launch.active = false;
     if (this.turbo) {

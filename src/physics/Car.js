@@ -40,7 +40,6 @@ export class Car {
     this.rpm = this.cfg.idleRPM;
     this.nitroT = 0;
     this.nitroCd = 0;
-    this.resetPos = new THREE.Vector3(0, 1.0, 0);
 
     // Clutch analógico (hold-time → pedal progressivo).
     // 1s segurando Ctrl → pedal 1.0; soltar recupera a 3x velocidade (~0.33s).
@@ -52,23 +51,45 @@ export class Car {
         idleRPM: c.idleRPM,
         redlineRPM: c.maxRPM,
         maxRPM: c.maxRPM + 300,
-        inertia: 0.18,
-        frictionPassive: 18.0,
+        // Inércia 0.20 — virabrequim equilibrado (sobe rápido o suficiente pra
+        // sentir o turbo, mas não decola sem load). Antes 0.22 era pesado.
+        inertia: 0.20,
+        // Fricção interna reduzida: motor turbo bem balanceado tem perdas
+        // menores que o que tinhamos antes (22+0.014w+2e-5w² roubava ~50Nm
+        // em alto RPM, comendo toda a potência de topo).
+        frictionPassive: 14.0,
+        frictionLinear: 0.010,
+        frictionQuadratic: 1.4e-5,
+        // Freio motor: 180 Nm @ redline. Aplicado só em throttle<5%.
+        coastTorque: 180.0,
         revLimitMode: 'hard',
         canStall: false,
       },
       clutch: {
-        maxTorqueTransfer: 600,
+        // Clutch de drift bombadex (org.: organic + cerâmico): 1100 Nm de
+        // capacidade. Antes 600 Nm capava o pico de boost (raw 540 × turbo
+        // 1.8 = 972 Nm), abafando o motor em arrancada e burnout.
+        maxTorqueTransfer: 1100,
       },
       gearbox: {
         gearRatios: c.gearRatios,
         shiftTime: 0.3,
         autoShift: true,
       },
+      shifting: {
+        cooldownH:           PHYSICS_CFG.shiftCooldownH,
+        cooldownSeq:         PHYSICS_CFG.shiftCooldownSeq,
+        overrevMarginRPM:    PHYSICS_CFG.shiftOverrevMarginRPM,
+        minRPMAfterUpshift:  PHYSICS_CFG.shiftMinRPMAfterUpshift,
+        minPostUpshiftRPM:   PHYSICS_CFG.shiftMinPostUpshiftRPM,
+      },
       differential: {
         type: 'welded',           // default modo Forza arcade-friendly
         finalDrive: c.diffRatio,
-        efficiency: c.transEfficiency,
+        // Diff efficiency = 0.95 (rolamentos + diff oil). Use o default da
+        // classe Differential — antes estava recebendo transEfficiency (0.82)
+        // por engano, dobrando a perda mecânica entre engine e roda.
+        // efficiency: 0.95  (default)
         preload: 80,
         powerLock: 0.5,
         coastLock: 0.3,
@@ -82,8 +103,10 @@ export class Car {
         launchRPM: 4500,
       },
       turbo: {
+        // 0.8 bar peak (~+80% torque). Spool 3.5 (era 2.0) — turbo responde
+        // mais rápido, drift power chega antes em saída de curva.
         maxBoost: 0.8,
-        spoolRate: 2.0,
+        spoolRate: 3.5,
       },
       finalDrive: c.diffRatio,
       transEfficiency: c.transEfficiency,
@@ -104,7 +127,6 @@ export class Car {
     const staticCompression = (c.mass * c.gravity / 4) / c.springRate;
     this.initialY = c.suspRestLength - staticCompression + c.wheelRadius - attachY;
     this.position.y = this.initialY;
-    this.resetPos.y = this.initialY;
   }
 
   buildVisuals() {
@@ -474,17 +496,28 @@ export class Car {
     let throttleInput = gas * nitroMult;
     let brakeInput = brk;
 
+    // Engatar ré: freio segurado e carro quase parado / indo pra trás.
+    // (setReverse não tem gating de RPM — wheelOmega ≈ 0 nesse cenário.)
+    const gb = this.powertrain.gearbox;
     if (brk > 0 && this.velocityLocal.x < 1.0) {
-      this.powertrain.gearbox.setReverse();
+      gb.setReverse();
       throttleInput = brk;
       brakeInput = 0;
-    } else if (gas > 0 && this.velocityLocal.x > -1.0 && this.powertrain.gearbox.currentGear < 2) {
-      this.powertrain.gearbox.shiftUp();
-    } else if (this.powertrain.gearbox.currentGear === 1 && gas > 0) {
+    } else if (gas > 0 && this.velocityLocal.x > -1.0 && gb.currentGear < 2) {
+      // Saindo de N(0) ou R(1) para 1ª(2). Pula direto pra 1ª (não sobe gear-by-gear,
+      // senão N → R por shiftUp, que é absurdo).
+      if (!gb.isShifting && gb.shiftCooldown <= 0) {
+        gb.targetGear = 2;
+        gb._startShift();
+      }
+    } else if (gb.currentGear === 1 && gas > 0) {
+      // Em ré com gas → trata como freio para parar a ré.
       brakeInput = gas;
       throttleInput = 0;
     }
 
+    // Manual: Q downshift, E upshift. Ambos respeitam gating (overrev/bog/cooldown).
+    // Se bloqueado, gearbox.lastBlockedReason fica setado e o HUD pisca o motivo.
     if (input.once('KeyQ')) this.powertrain.gearbox.shiftDown();
     if (input.once('KeyE')) this.powertrain.gearbox.shiftUp();
 
