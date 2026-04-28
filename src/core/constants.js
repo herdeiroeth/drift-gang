@@ -62,3 +62,31 @@ export const PHYSICS_CFG = {
   // Isso evita pular pra 6ª em arrancada.
   autoShiftUseDrivetrainRPMWhenSlip: true,
 };
+
+// Multiplicador de mu por superfície. Aplicado em Wheel.updateTireForces
+// como fator multiplicativo sobre cfg.mu (que é o pneu base seco asfalto).
+// asphalt: 1.0 mantém o comportamento atual no modo arena livre.
+// Fase 5 do roadmap de pistas — definido aqui pra ficar disponível desde o
+// começo (constante zero-cost se não usado).
+export const SURFACE_MU = {
+  asphalt: 1.0,
+  curb:    0.92,
+  grass:   0.38,
+};
+
+// Configuração de geração de pistas (TrackBuilder/TrackGeometry).
+export const TRACK_CFG = {
+  // Resolução de amostragem da spline. 0.5 = 1 sample a cada 2m.
+  // 600m de pista → ~300 samples → ~600 triângulos no asfalto. Trivial pra GPU.
+  samplesPerMeter: 0.5,
+
+  // Tile da textura de asfalto em metros (afeta UV repeat lateral e longitudinal).
+  // 6m por tile = textura repete a cada ~2 carros de comprimento — granulado fino.
+  asphaltTileMeters: 6.0,
+
+  // Padrão da zebra (par red/white) em metros. F1 padrão ≈ 2m.
+  curbPatternMeters: 2.0,
+
+  // Largura mínima do gate (metros) — usado se a pista não tiver grama definida.
+  gateMinWidth: 14.0,
+};

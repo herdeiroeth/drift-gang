@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PHYSICS_CFG } from '../core/constants.js';
+import { PHYSICS_CFG, SURFACE_MU } from '../core/constants.js';
 import {
   combinedSlipForces,
   gripFactor,
@@ -32,6 +32,10 @@ export class Wheel {
     this.isGrounded = false;
     this.hitDistance = 0;
     this.hitPoint = new THREE.Vector3();
+
+    // Surface-aware physics (Fase 5). Lido do mesh.userData.surfaceType no raycast,
+    // multiplica mu efetivo via SURFACE_MU em updateTireForces.
+    this.currentSurface = 'asphalt';
 
     this.angularVelocity = 0;
     this.driveTorque = 0;
@@ -105,6 +109,7 @@ export class Wheel {
       this.isGrounded = true;
       this.hitDistance = hits[0].distance;
       this.hitPoint.copy(hits[0].point);
+      this.currentSurface = hits[0].object.userData?.surfaceType ?? 'asphalt';
       compression = c.suspRestLength - (this.hitDistance - c.wheelRadius);
       if (compression < 0) compression = 0;
       const maxComp = c.suspRestLength + 0.12;
@@ -112,6 +117,7 @@ export class Wheel {
     } else {
       this.isGrounded = false;
       this.hitDistance = this.rayLen;
+      this.currentSurface = 'asphalt';  // fallback no ar
       compression = 0;
     }
 
@@ -159,9 +165,11 @@ export class Wheel {
       return;
     }
     const c = this.cfg;
-    // mu efetivo: grip degradation por temperatura (cold→0.85, optimal→1.0,
-    // overheat→0.55). gripFactor() está em Tire.js para manter o modelo lá.
-    const mu = c.mu * gripFactor(this.tireTemp);
+    // mu efetivo = base do pneu × temperatura × tipo de superfície (asphalt/curb/grass).
+    //   gripFactor() em Tire.js: 0.85 cold → 1.0 optimal → 0.55 overheat.
+    //   SURFACE_MU em constants.js: asphalt 1.0, curb 0.92, grass 0.38.
+    const surfaceMu = SURFACE_MU[this.currentSurface] ?? 1.0;
+    const mu = c.mu * gripFactor(this.tireTemp) * surfaceMu;
     const N = this.normalLoad;
 
     // ---- slip angle (lateral)

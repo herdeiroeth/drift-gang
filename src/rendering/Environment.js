@@ -37,7 +37,8 @@ export function setupEnv(scene) {
 }
 
 export function setupLights(scene) {
-  scene.add(new THREE.HemisphereLight(0xffaaee, 0x222233, 0.5));
+  const hemi = new THREE.HemisphereLight(0xffaaee, 0x222233, 0.5);
+  scene.add(hemi);
   const dir = new THREE.DirectionalLight(0xffffff, 1.2);
   dir.position.set(40, 80, 30);
   dir.castShadow = true;
@@ -46,4 +47,6 @@ export function setupLights(scene) {
   dir.shadow.camera.left = -200; dir.shadow.camera.right = 200;
   dir.shadow.camera.top = 200; dir.shadow.camera.bottom = -200;
   scene.add(dir);
+  // Retorna refs pra Game.js poder ajustar shadow camera baseado em bbox da pista.
+  return { hemi, dir };
 }

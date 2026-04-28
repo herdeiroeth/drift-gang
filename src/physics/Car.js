@@ -165,13 +165,19 @@ export class Car {
 
   wheelWorld(i) { return this.wheels[i].getWorldPosition(); }
 
-  reset() {
-    this.position.set(0, this.initialY, 0);
+  // spawn opcional: { x, z, heading } — usado pra spawnar em start/finish de
+  // uma pista. Y vem sempre de this.initialY (calculado pela suspensão estática).
+  // Sem spawn → comportamento legado (origem, heading=0).
+  reset(spawn = null) {
+    const x = spawn?.x ?? 0;
+    const z = spawn?.z ?? 0;
+    const heading = spawn?.heading ?? 0;
+    this.position.set(x, this.initialY, z);
     this.velocity.set(0, 0, 0);
     this.velocityLocal.set(0, 0, 0);
     this.accel.set(0, 0, 0);
     this.accelLocal.set(0, 0, 0);
-    this.heading = 0;
+    this.heading = heading;
     this.yawRate = 0;
     this.absVel = 0;
     this.steer = 0;
@@ -192,8 +198,8 @@ export class Car {
       w.steerAngle = 0;
       w.tireTemp = 25;  // ambient
     }
-    this.mesh.position.set(0, this.initialY, 0);
-    this.mesh.rotation.set(0, 0, 0);
+    this.mesh.position.set(x, this.initialY, z);
+    this.mesh.rotation.set(0, heading, 0);
   }
 
   applySmoothSteer(steerInput, dt) {
