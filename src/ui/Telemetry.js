@@ -30,7 +30,7 @@ export class Telemetry {
     root.style.cssText = [
       'position:absolute',
       'top:8px',
-      'left:calc(100vw - 320px)',
+      'left:calc(100vw - 390px)',
       'font-family:ui-monospace,Menlo,Consolas,monospace',
       'font-size:11px',
       'line-height:1.35',
@@ -40,7 +40,7 @@ export class Telemetry {
       'border-radius:4px',
       'pointer-events:auto',
       'z-index:1000',
-      'min-width:280px',
+      'min-width:350px',
       'user-select:none',
       'touch-action:none',
     ].join(';');
@@ -85,19 +85,20 @@ export class Telemetry {
 
     // ---- yaw rate
     root.appendChild(this._makeRow('YawRate', (this.elYaw = document.createElement('span')), '°/s'));
+    root.appendChild(this._makeRow('Body', (this.elBody = document.createElement('span')), ''));
 
     // ---- wheel table
     const table = document.createElement('div');
-    table.style.cssText = 'display:grid;grid-template-columns:32px 1fr 1fr 1fr 1fr;gap:2px 6px;margin-top:6px;font-size:10.5px';
+    table.style.cssText = 'display:grid;grid-template-columns:32px repeat(7, 1fr);gap:2px 5px;margin-top:6px;font-size:10.5px';
     // header row
-    ['', 'SlipA°', 'SlipR%', 'Fy(N)', 'Fz(N)'].forEach((h, i) => {
+    ['', 'SlipA°', 'SlipR%', 'Fz', 'Cmp', 'Spr', 'Dmp', 'ARB'].forEach((h, i) => {
       const c = document.createElement('div');
       c.textContent = h;
       c.style.cssText = 'color:#a7f3d0;text-align:' + (i === 0 ? 'left' : 'right') + ';font-weight:bold';
       table.appendChild(c);
     });
 
-    // 4 wheel rows × 4 metric cells
+    // 4 wheel rows × suspension/tire metric cells
     this.elWheels = [];                  // [{slipA, slipR, fy, fz}, ...]
     for (let i = 0; i < 4; i++) {
       const lab = document.createElement('div');
@@ -107,13 +108,19 @@ export class Telemetry {
 
       const slipA = document.createElement('div'); slipA.style.textAlign = 'right'; slipA.textContent = '0.0';
       const slipR = document.createElement('div'); slipR.style.textAlign = 'right'; slipR.textContent = '0.0';
-      const fy    = document.createElement('div'); fy.style.textAlign    = 'right'; fy.textContent    = '0';
       const fz    = document.createElement('div'); fz.style.textAlign    = 'right'; fz.textContent    = '0';
+      const comp  = document.createElement('div'); comp.style.textAlign  = 'right'; comp.textContent  = '0';
+      const spr   = document.createElement('div'); spr.style.textAlign   = 'right'; spr.textContent   = '0';
+      const dmp   = document.createElement('div'); dmp.style.textAlign   = 'right'; dmp.textContent   = '0';
+      const arb   = document.createElement('div'); arb.style.textAlign   = 'right'; arb.textContent   = '0';
       table.appendChild(slipA);
       table.appendChild(slipR);
-      table.appendChild(fy);
       table.appendChild(fz);
-      this.elWheels.push({ slipA, slipR, fy, fz });
+      table.appendChild(comp);
+      table.appendChild(spr);
+      table.appendChild(dmp);
+      table.appendChild(arb);
+      this.elWheels.push({ slipA, slipR, fz, comp, spr, dmp, arb });
     }
     root.appendChild(table);
 
@@ -258,6 +265,9 @@ export class Telemetry {
     // ---- yaw rate (rad/s → °/s)
     const yawDeg = (car.yawRate || 0) * RAD2DEG;
     this.elYaw.textContent = (yawDeg >= 0 ? '+' : '') + yawDeg.toFixed(1);
+    const pitchDeg = (car.pitch || 0) * RAD2DEG;
+    const rollDeg = (car.roll || 0) * RAD2DEG;
+    this.elBody.textContent = `Y ${((car.position?.y ?? 0)).toFixed(2)}m P ${pitchDeg.toFixed(1)}° R ${rollDeg.toFixed(1)}°`;
 
     // ---- per-wheel
     const wheels = car.wheels || [];
@@ -267,8 +277,11 @@ export class Telemetry {
       const cells = this.elWheels[i];
       cells.slipA.textContent = ((w.slipAngle || 0) * RAD2DEG).toFixed(1);
       cells.slipR.textContent = ((w.slipRatio || 0) * 100).toFixed(1);
-      cells.fy.textContent    = (w.lateralForce || 0).toFixed(0);
       cells.fz.textContent    = (w.normalLoad || 0).toFixed(0);
+      cells.comp.textContent  = ((w.compression || 0) * 1000).toFixed(0);
+      cells.spr.textContent   = ((w.springForce || 0) / 1000).toFixed(1);
+      cells.dmp.textContent   = ((w.damperForce || 0) / 1000).toFixed(1);
+      cells.arb.textContent   = ((w.arbForce || 0) / 1000).toFixed(1);
     }
 
     // ---- graph buffers (rear: RL=2, RR=3)

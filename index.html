@@ -7,6 +7,11 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div id="loading-screen" class="overlay loading">
+    <h1>LOADING</h1>
+    <p>Carregando BMW M4 F82… <span id="loading-progress">0%</span></p>
+  </div>
+
   <div id="start-screen" class="overlay">
     <h1>DRIFT 3D</h1>
     <p>Press SPACE to Start</p>
@@ -19,7 +24,14 @@
       <p>C — Camera</p>
       <p>K — Tuning</p>
     </div>
+    <div class="credits">
+      Modelo: <a href="https://sketchfab.com" target="_blank" rel="noopener">BMW M4 F82</a> — CC-BY 4.0
+    </div>
   </div>
+
+  <footer id="model-credit">
+    BMW M4 F82 — modelo 3D licenciado <a href="http://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC-BY 4.0</a>
+  </footer>
 
   <div id="hud" class="hud hidden">
     <div class="hud-left">

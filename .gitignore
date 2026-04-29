@@ -29,3 +29,10 @@ pnpm-debug.log*
 .vscode/
 .idea/
 .claude/
+
+# 3D model assets (binários grandes — ver public/models/README.md)
+/public/models/*.glb
+/public/models/*.gltf
+/public/models/*.fbx
+/public/models/*.bin
+

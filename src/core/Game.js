@@ -18,13 +18,39 @@ import { TRACK_CFG } from './constants.js';
 import { TuningUI } from '../tuning/TuningUI.js';
 import { TrackEditor } from '../editor/TrackEditor.js';
 import { Telemetry } from '../ui/Telemetry.js';
+import { loadCarModel } from '../rendering/car/loaders/CarModelLoader.js';
+import { VISUAL_CFG } from '../rendering/car/CarVisualConfig.js';
 
 // Toggle de modo: pista vs arena livre. Default: pista (Pista 1).
 // Arena livre é mantido para testes de tuning sem voltas (legado).
 const USE_TRACK = true;
 
 export class Game {
-  constructor() {
+  // Pré-carrega o GLB do carro antes de instanciar o Game (Car.constructor é
+  // síncrono, então o asset precisa estar pronto quando ele rodar). Mantém
+  // tela de loading visível e atualiza progresso via callback.
+  static async create() {
+    const cfg = VISUAL_CFG.gltfBody;
+    let gltfScene = null;
+    if (cfg.enabled) {
+      try {
+        gltfScene = await loadCarModel(cfg.url, {
+          onProgress: (p) => {
+            const el = document.getElementById('loading-progress');
+            if (el) el.textContent = `${Math.round(p * 100)}%`;
+          },
+        });
+      } catch (err) {
+        console.error('[Game] Failed to load car GLB, falling back to procedural:', err);
+      }
+    }
+    const loading = document.getElementById('loading-screen');
+    if (loading) loading.classList.add('hidden');
+    return new Game({ gltfScene });
+  }
+
+  constructor(opts = {}) {
+    this.opts = opts;
     this.canvas = document.getElementById('game-canvas');
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -56,7 +82,7 @@ export class Game {
       this.groundObjects = this.arena.groundObjects;
       this.track = null;
     }
-    this.car = new Car(this.scene, this.groundObjects);
+    this.car = new Car(this.scene, this.groundObjects, { gltfScene: this.opts.gltfScene });
     this.camCtrl = new CamCtrl(this.camera);
 
     this.hud = new HUDManager();

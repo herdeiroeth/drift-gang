@@ -3,13 +3,15 @@ import { CarConfig } from './CarConfig.js';
 import { Wheel } from './Wheel.js';
 import { PowertrainSystem } from '../powertrain.js';
 import { GAME_CFG, PHYSICS_CFG } from '../core/constants.js';
+import { CarVisuals } from '../rendering/car/CarVisuals.js';
+import { pneumaticTrail } from './Tire.js';
 
 export class Car {
-  constructor(scene, groundObjects) {
+  constructor(scene, groundObjects, opts = {}) {
     this.scene = scene;
+    this.opts = opts;
     this.groundObjects = groundObjects;
     this.mesh = new THREE.Group();
-    this.buildVisuals();
     scene.add(this.mesh);
 
     this.config = new CarConfig();
@@ -116,6 +118,7 @@ export class Car {
     const fAxle = c.cgToFrontAxle;
     const rAxle = -c.cgToRearAxle;
     const attachY = 0.12;
+    this.suspAttachY = attachY;
 
     this.wheels = [
       new Wheel(scene, new THREE.Vector3(-hw, attachY, fAxle), true, c),
@@ -124,46 +127,27 @@ export class Car {
       new Wheel(scene, new THREE.Vector3( hw, attachY, rAxle), false, c),
     ];
 
-    const staticCompression = (c.mass * c.gravity / 4) / c.springRate;
-    this.initialY = c.suspRestLength - staticCompression + c.wheelRadius - attachY;
+    this.initialY = this.computeStaticRideHeight();
     this.position.y = this.initialY;
-  }
+    for (const w of this.wheels) {
+      w.resetSuspension(this.position, this.heading, this.pitch, this.roll, this.groundObjects);
+    }
 
-  buildVisuals() {
-    const bodyMat = new THREE.MeshPhysicalMaterial({
-      color: 0xff2a6d, roughness: 0.25, metalness: 0.3,
-      clearcoat: 1.0, clearcoatRoughness: 0.15
-    });
-    const body = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.48, 3.3), bodyMat);
-    body.position.y = 0.42; body.castShadow = true; this.mesh.add(body);
-
-    const glassMat = new THREE.MeshPhysicalMaterial({
-      color: 0x111111, roughness: 0.05, metalness: 0.4,
-      transmission: 0.4, transparent: true, thickness: 0.05
-    });
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.36, 1.5), glassMat);
-    cabin.position.set(0, 0.82, -0.2); cabin.castShadow = true; this.mesh.add(cabin);
-
-    const spoiler = new THREE.Mesh(
-      new THREE.BoxGeometry(1.55, 0.07, 0.5),
-      new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.4, metalness: 0.6 })
-    );
-    spoiler.position.set(0, 0.76, -1.45); spoiler.castShadow = true; this.mesh.add(spoiler);
-
-    const lightMat = new THREE.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffffaa, emissiveIntensity: 2.5 });
-    const flLight = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.12, 0.08), lightMat);
-    flLight.position.set(-0.55, 0.42, 1.62); this.mesh.add(flLight);
-    const frLight = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.12, 0.08), lightMat);
-    frLight.position.set(0.55, 0.42, 1.62); this.mesh.add(frLight);
-
-    const tailMat = new THREE.MeshStandardMaterial({ color: 0xff1111, emissive: 0xff0000, emissiveIntensity: 1.5 });
-    const tlLight = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.10, 0.06), tailMat);
-    tlLight.position.set(-0.55, 0.48, -1.62); this.mesh.add(tlLight);
-    const trLight = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.10, 0.06), tailMat);
-    trLight.position.set(0.55, 0.48, -1.62); this.mesh.add(trLight);
+    this.visuals = new CarVisuals(scene, this, this.opts);
   }
 
   wheelWorld(i) { return this.wheels[i].getWorldPosition(); }
+
+  computeStaticRideHeight() {
+    const c = this.cfg;
+    const frontK = c.springRateFront ?? c.springRate;
+    const rearK = c.springRateRear ?? c.springRate;
+    const frontComp = (c.sprungMass * c.gravity * c.axleWeightRatioFront * 0.5) / Math.max(1, frontK);
+    const rearComp = (c.sprungMass * c.gravity * c.axleWeightRatioRear * 0.5) / Math.max(1, rearK);
+    const staticCompression = (frontComp + rearComp) * 0.5;
+    const tireDeflection = ((c.mass * c.gravity) / 4) / Math.max(1, c.tireVerticalRate);
+    return c.suspRestLength - staticCompression + c.wheelRadius - tireDeflection - this.suspAttachY;
+  }
 
   // spawn opcional: { x, z, heading } — usado pra spawnar em start/finish de
   // uma pista. Y vem sempre de this.initialY (calculado pela suspensão estática).
@@ -172,6 +156,7 @@ export class Car {
     const x = spawn?.x ?? 0;
     const z = spawn?.z ?? 0;
     const heading = spawn?.heading ?? 0;
+    this.initialY = this.computeStaticRideHeight();
     this.position.set(x, this.initialY, z);
     this.velocity.set(0, 0, 0);
     this.velocityLocal.set(0, 0, 0);
@@ -197,6 +182,7 @@ export class Car {
       w.brakeTorque = 0;
       w.steerAngle = 0;
       w.tireTemp = 25;  // ambient
+      w.resetSuspension(this.position, this.heading, this.pitch, this.roll, this.groundObjects);
     }
     this.mesh.position.set(x, this.initialY, z);
     this.mesh.rotation.set(0, heading, 0);
@@ -219,15 +205,46 @@ export class Car {
     return steerInput * (1.0 - reduction);
   }
 
-  applySelfAligningTorque(dt) {
+  /**
+   * SAT físico do kingpin (substitui o hack antigo `applySelfAligningTorque`).
+   *
+   *   M_kingpin = Fy_front · (mech_trail + pneum_trail(α))
+   *
+   * - mech_trail = R_wheel · sin(caster_angle)  — fixo, vem do cfg.
+   * - pneum_trail(α) decai de t0 a zero entre 0 e α_peak (~6°).
+   *   Pós-peak: zero — efeito visível como "volante fica leve" antes
+   *   do front quebrar grip.
+   *
+   * Aplicado em duas vias (HÍBRIDO):
+   *   (a) input-side: corrige `this.steer` (countersteer "vivo" em pad/teclado)
+   *   (b) chassis-side: contribui ~5-10% ao yawTorque do passo
+   *
+   * Retorna a contribuição chassis-side (em N·m) para o caller acumular
+   * no yawTorque total daquele sub-step.
+   *
+   * @param {number} sdt sub-step dt
+   * @returns {number} M_kingpin · M_kingpinChassisGain — N·m a somar no yaw
+   */
+  applyKingpinSAT(sdt) {
+    const c = this.cfg;
     const fl = this.wheels[0];
     const fr = this.wheels[1];
-    if (!fl || !fr) return;
-    const avgFrontSlip = (fl.slipAngle + fr.slipAngle) * 0.5;
-    const speedFactor = Math.min(1.0, this.absVel / 20.0);
-    const SAT_STRENGTH = 0.6;
-    const correction = -avgFrontSlip * speedFactor * SAT_STRENGTH * dt;
+    if (!fl || !fr) return 0;
+    if (!fl.isGrounded && !fr.isGrounded) return 0;
+
+    const Fy_front = fl.lateralForce + fr.lateralForce;
+    const alphaAvg = (fl.slipAngle + fr.slipAngle) * 0.5;
+    const tPneum = pneumaticTrail(alphaAvg, { alphaPeak: c.alphaPeak, pneumTrail0: c.pneumTrail0 });
+    const tMech = c.mechTrail;   // = R · sin(caster), pré-computado em CarConfig
+
+    const M_kingpin = Fy_front * (tMech + tPneum);
+
+    // (a) input-side correction
+    const correction = M_kingpin * c.steerSatGain * sdt;
     this.steer = Math.max(-1.0, Math.min(1.0, this.steer + correction));
+
+    // (b) chassis-side: retornado para o caller somar ao yawTorque
+    return M_kingpin * c.M_kingpinChassisGain;
   }
 
   ackermann(steerInner) {
@@ -241,13 +258,76 @@ export class Car {
     return Math.sign(steerInner) * outer;
   }
 
+  applySuspensionLoadTransfer() {
+    const c = this.cfg;
+    const fl = this.wheels[0], fr = this.wheels[1], rl = this.wheels[2], rr = this.wheels[3];
+
+    const frontArb = c.antiRollFront * (fl.compression - fr.compression) * 0.5;
+    const rearArb  = c.antiRollRear  * (rl.compression - rr.compression) * 0.5;
+
+    const ax = this.accelLocal.x || 0;
+    const ay = this.accelLocal.z || 0;
+    const longTransfer = c.mass * ax * c.cgHeight / c.wheelBase * c.longitudinalLoadTransferScale;
+    const frontLat = c.mass * c.axleWeightRatioFront * ay * c.rollCenterHeightFront / c.trackWidth * c.geometricLoadTransferScale;
+    const rearLat  = c.mass * c.axleWeightRatioRear  * ay * c.rollCenterHeightRear  / c.trackWidth * c.geometricLoadTransferScale;
+
+    const apply = (w, arbForce, latTransfer) => {
+      const side = Math.sign(w.offsetLocal.x) || 1;
+      const latLoad = -side * latTransfer;
+      const longLoad = w.isFront ? -longTransfer * 0.5 : longTransfer * 0.5;
+      w.applySuspensionLoads(arbForce, latLoad + longLoad);
+    };
+
+    apply(fl,  frontArb, frontLat);
+    apply(fr, -frontArb, frontLat);
+    apply(rl,   rearArb, rearLat);
+    apply(rr,  -rearArb, rearLat);
+  }
+
+  integrateSprungBody(sdt) {
+    const c = this.cfg;
+    let totalSuspensionForce = 0;
+    let pitchTorque = -c.sprungMass * (this.accelLocal.x || 0) * c.cgHeight;
+    let rollTorque  = c.sprungMass * (this.accelLocal.z || 0) * c.cgHeight;
+
+    for (const w of this.wheels) {
+      const F = w.suspensionForce;
+      totalSuspensionForce += F;
+      pitchTorque += -F * w.offsetLocal.z;
+      rollTorque += F * w.offsetLocal.x;
+    }
+
+    const heaveAccel = (totalSuspensionForce - c.sprungMass * c.gravity) / c.sprungMass;
+    this.velocity.y += heaveAccel * sdt;
+    this.position.y += this.velocity.y * sdt;
+
+    const pitchAccel = (pitchTorque / c.pitchInertia) - this.pitchVel * c.pitchDamp - this.pitch * c.pitchStiff;
+    // `this.roll` is the inverse of the physical Z rotation used by Three.js
+    // (`mesh.rotation.z = -roll`), so physical torque_z must be inverted here.
+    const rollAccel  = (-rollTorque / c.rollInertia)  - this.rollVel  * c.rollDamp  - this.roll  * c.rollStiff;
+
+    this.pitchVel += pitchAccel * sdt;
+    this.rollVel  += rollAccel  * sdt;
+    this.pitch += this.pitchVel * sdt;
+    this.roll  += this.rollVel  * sdt;
+
+    if (Math.abs(this.pitch) > c.maxBodyPitch) {
+      this.pitch = Math.sign(this.pitch) * c.maxBodyPitch;
+      if (Math.sign(this.pitchVel) === Math.sign(this.pitch)) this.pitchVel *= 0.25;
+    }
+    if (Math.abs(this.roll) > c.maxBodyRoll) {
+      this.roll = Math.sign(this.roll) * c.maxBodyRoll;
+      if (Math.sign(this.rollVel) === Math.sign(this.roll)) this.rollVel *= 0.25;
+    }
+  }
+
   doPhysics(dt, throttleInput, brakeInput, steerInput, ebrakeInput, clutchPedalInput = 0) {
     const steps = PHYSICS_CFG.subSteps;
     const sdt = dt / steps;
     const c = this.cfg;
     let wheelData = [];
 
-    this.applySelfAligningTorque(dt);
+    // SAT agora vive DENTRO do sub-step (j) — emerge do M_kingpin pós-tire-forces.
 
     let ptResult = null;
     for (let step = 0; step < steps; step++) {
@@ -267,18 +347,8 @@ export class Car {
 
       const fl = this.wheels[0], fr = this.wheels[1], rl = this.wheels[2], rr = this.wheels[3];
 
-      const totalSusp = fl.suspensionForce + fr.suspensionForce + rl.suspensionForce + rr.suspensionForce;
-      const vAccel = (totalSusp - c.mass * c.gravity) / c.mass;
-      this.velocity.y += vAccel * sdt;
-      this.position.y += this.velocity.y * sdt;
-
-      // ARB: transfere carga para a roda mais comprimida (externa em curvas)
-      const frontRoll = c.antiRollFront * (fl.compression - fr.compression);
-      const rearRoll  = c.antiRollRear  * (rl.compression - rr.compression);
-      fl.normalLoad = Math.max(0, fl.suspensionForce + frontRoll * 0.5);
-      fr.normalLoad = Math.max(0, fr.suspensionForce - frontRoll * 0.5);
-      rl.normalLoad = Math.max(0, rl.suspensionForce + rearRoll * 0.5);
-      rr.normalLoad = Math.max(0, rr.suspensionForce - rearRoll * 0.5);
+      this.applySuspensionLoadTransfer();
+      this.integrateSprungBody(sdt);
 
       // Ackermann: roda interna gira mais que a externa
       const rawSteer = this.steer * c.maxSteer;
@@ -373,6 +443,13 @@ export class Car {
           slipAngle: w.slipAngle,
           slipRatio: w.slipRatio,
           normalLoad: w.normalLoad,
+          compression: w.compression,
+          compressionSpeed: w.compressionSpeed,
+          springForce: w.springForce,
+          damperForce: w.damperForce,
+          tireVerticalForce: w.tireVerticalForce,
+          arbForce: w.arbForce,
+          geoLoad: w.geoLoad,
           fx, fz,
           angularVel: w.angularVelocity,
           tireTemp: w.tireTemp,
@@ -383,6 +460,11 @@ export class Car {
       const airDragZ = -c.Cdrag * this.velocityLocal.z * Math.abs(this.velocityLocal.z);
       totalFx += airDragX;
       totalFz += airDragZ;
+
+      // SAT físico via kingpin moment. Aplica correção input-side em
+      // `this.steer` e retorna a contribuição chassis-side para o yaw.
+      // Lateral forces das rodas dianteiras já estão atualizadas (loop acima).
+      yawTorque += this.applyKingpinSAT(sdt);
 
       this.accelLocal.x = totalFx / c.mass;
       this.accelLocal.z = totalFz / c.mass;
@@ -397,7 +479,8 @@ export class Car {
       this.absVel = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
 
       if (this.absVel < PHYSICS_CFG.stopVelocityThreshold && throttleInput < 0.01 && brakeInput < 0.01) {
-        this.velocity.set(0, 0, 0);
+        this.velocity.x = 0;
+        this.velocity.z = 0;
         this.absVel = 0;
         this.yawRate = 0;
         for (const w of this.wheels) w.angularVelocity *= 0.9;
@@ -410,13 +493,6 @@ export class Car {
 
       this.position.x += this.velocity.x * sdt;
       this.position.z += this.velocity.z * sdt;
-
-      const targetPitch = -this.accelLocal.x * PHYSICS_CFG.pitchAccelGain;
-      const targetRoll  = -this.accelLocal.z * PHYSICS_CFG.rollAccelGain;
-      this.pitchVel += ((targetPitch - this.pitch) * c.pitchStiff - this.pitchVel * c.pitchDamp) * sdt;
-      this.rollVel  += ((targetRoll  - this.roll)  * c.rollStiff  - this.rollVel  * c.rollDamp)  * sdt;
-      this.pitch += this.pitchVel * sdt;
-      this.roll  += this.rollVel * sdt;
 
       this.mesh.position.copy(this.position);
       this.mesh.rotation.set(this.pitch, this.heading, -this.roll);
@@ -479,6 +555,19 @@ export class Car {
 
     if (typeof p.gearboxMode === 'string' && pt?.gearbox?.setMode) {
       pt.gearbox.setMode(p.gearboxMode);
+    }
+
+    if (p.suspension && cfg) {
+      const s = p.suspension;
+      if (typeof s.suspRestLength === 'number') cfg.suspRestLength = s.suspRestLength;
+      if (typeof s.springRateFront === 'number') cfg.springRateFront = s.springRateFront;
+      if (typeof s.springRateRear === 'number') cfg.springRateRear = s.springRateRear;
+      if (typeof s.damperBumpFront === 'number') cfg.damperBumpFront = s.damperBumpFront;
+      if (typeof s.damperBumpRear === 'number') cfg.damperBumpRear = s.damperBumpRear;
+      if (typeof s.damperReboundFront === 'number') cfg.damperReboundFront = s.damperReboundFront;
+      if (typeof s.damperReboundRear === 'number') cfg.damperReboundRear = s.damperReboundRear;
+      if (typeof s.antiRollFront === 'number') cfg.antiRollFront = s.antiRollFront;
+      if (typeof s.antiRollRear === 'number') cfg.antiRollRear = s.antiRollRear;
     }
   }
 
@@ -567,10 +656,7 @@ export class Car {
 
     const phys = this.doPhysics(dt, throttleInput, brakeInput, steerRaw, hb, this.clutchHold);
 
-    for (const w of this.wheels) {
-      w.mesh.rotation.set(this.pitch, this.heading + w.steerAngle, -this.roll, 'YXZ');
-      w.tireMesh.rotation.x += w.angularVelocity * dt;
-    }
+    this.visuals.update(dt);
 
     const rearSlip = (Math.abs(phys.wheelData[2].slipAngle) + Math.abs(phys.wheelData[3].slipAngle)) * 0.5;
     const isDrifting = rearSlip > PHYSICS_CFG.driftSlipThreshold && Math.abs(this.velocityLocal.x) > PHYSICS_CFG.driftMinSpeed;

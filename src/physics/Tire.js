@@ -79,8 +79,70 @@ export const DEFAULT_PACEJKA_LONGITUDINAL = {
 // Slip de pico aproximados (úteis para o cálculo de combined slip elíptico)
 // derivados das curvas: α_peak ≈ tan(π/(2C))/B ≈ 0.105 rad para C=1.3,B=10
 // e κ_peak ≈ 0.1 para C=1.65,B=10. Usamos valores fixos para estabilidade.
-const ALPHA_PEAK = 0.105;   // rad (~6°)
-const KAPPA_PEAK = 0.10;    // 10%
+export const ALPHA_PEAK = 0.105;   // rad (~6°)
+export const KAPPA_PEAK = 0.10;    // 10%
+
+// ---------------------------------------------------------------
+// Load sensitivity (Pacejka D coefficient — sublinear em Fz)
+// ---------------------------------------------------------------
+
+/**
+ * Coeficiente D efetivo do Pacejka, com load sensitivity sublinear.
+ *
+ *   D(N) = mu · N · (N / N_ref)^(n - 1)
+ *
+ * - n = 1.0  → linear (mu·N), comportamento "arcade".
+ * - n = 0.85 → sublinear realista; dobrar N só dá ~80% mais grip.
+ *   Esse expoente é o motor físico do dynamic understeer/oversteer:
+ *   quando o peso transfere pra fora em curva, a roda externa ganha
+ *   Fz mas perde μ_eff, e o eixo mais carregado fica "menos pegajoso".
+ *
+ * Referência: Wikipedia "Tire load sensitivity"; Pacejka 1994 usa
+ * `D = a1·Fz² + a2·Fz` com a1<0, naturalmente sublinear — esta é a
+ * forma simplificada equivalente.
+ *
+ * @param {number} mu     coeficiente de fricção combinado
+ * @param {number} N      carga normal (N)
+ * @param {object} params { loadSensN?, loadSensRefFz? }
+ * @returns {number} D (N) — força máxima disponível neste eixo
+ */
+export function effectiveD(mu, N, params = {}) {
+  if (N <= 0) return 0;
+  const n = params.loadSensN ?? 0.85;
+  if (n >= 0.999 && n <= 1.001) return mu * N;   // fast path linear
+  const ref = params.loadSensRefFz ?? 3200;       // ≈ static corner load (1300kg·g/4)
+  return mu * N * Math.pow(N / ref, n - 1);
+}
+
+// ---------------------------------------------------------------
+// Pneumatic trail (braço pneumático para SAT)
+// ---------------------------------------------------------------
+
+/**
+ * Trail pneumático em função do slip angle.
+ *
+ *   t_pneum(α) = t0 · max(0, 1 - |α|/α_peak) · sign(α)
+ *
+ * Decai linearmente até zero no peak (~6°). Pós-peak: zero.
+ * Combinado com mech_trail = R·sin(caster) no SAT do kingpin:
+ *   M_kingpin = Fy · (mech_trail + pneum_trail)
+ *
+ * O fato de o trail pneumático cair pra zero **antes** que Fy caia
+ * é o que dá a sensação de "warning" do pneu antes do break-away
+ * em pads/teclado: o volante fica leve um instante antes do front
+ * perder grip de fato.
+ *
+ * @param {number} slipAngle  rad
+ * @param {object} params     { alphaPeak?, pneumTrail0? }
+ * @returns {number} trail (m), com sinal do slip angle
+ */
+export function pneumaticTrail(slipAngle, params = {}) {
+  const alphaPeak = params.alphaPeak ?? ALPHA_PEAK;
+  const t0 = params.pneumTrail0 ?? 0.040;        // m
+  const a = Math.abs(slipAngle);
+  if (a >= alphaPeak) return 0;
+  return t0 * (1 - a / alphaPeak) * Math.sign(slipAngle);
+}
 
 // ---------------------------------------------------------------
 // Magic Formula puro (sem coupling)
@@ -101,7 +163,7 @@ export function pacejkaLateral(slipAngle, mu, N, params = {}) {
   const B = params.B ?? DEFAULT_PACEJKA_LATERAL.B;
   const C = params.C ?? DEFAULT_PACEJKA_LATERAL.C;
   const E = params.E ?? DEFAULT_PACEJKA_LATERAL.E;
-  const D = mu * N;
+  const D = effectiveD(mu, N, params);
 
   const Ba = B * slipAngle;
   const inner = Ba - E * (Ba - Math.atan(Ba));
@@ -126,7 +188,7 @@ export function pacejkaLongitudinal(slipRatio, mu, N, params = {}) {
   const B = params.B ?? DEFAULT_PACEJKA_LONGITUDINAL.B;
   const C = params.C ?? DEFAULT_PACEJKA_LONGITUDINAL.C;
   const E = params.E ?? DEFAULT_PACEJKA_LONGITUDINAL.E;
-  const D = mu * N;
+  const D = effectiveD(mu, N, params);
 
   const Bk = B * slipRatio;
   const inner = Bk - E * (Bk - Math.atan(Bk));
@@ -170,8 +232,15 @@ export function combinedSlipForces(slipAngle, slipRatio, mu, N, params = {}) {
   const lateralParams = params.lateral
     ?? (params.isRear ? REAR_PACEJKA_LATERAL : DEFAULT_PACEJKA_LATERAL);
 
-  const Fx0 = pacejkaLongitudinal(slipRatio, mu, N, params.longitudinal);
-  const Fy0 = pacejkaLateral(slipAngle, mu, N, lateralParams);
+  // Routing dos params de load sensitivity para as funções puras.
+  // Ambas precisam ver os mesmos `loadSensN` e `loadSensRefFz` que estão
+  // no envelope `params` deste call — caso contrário Fx0 e Fy0 saem
+  // computados com defaults e o círculo de fricção fica inconsistente.
+  const lateralCall = { ...lateralParams, loadSensN: params.loadSensN, loadSensRefFz: params.loadSensRefFz };
+  const longCall = { ...(params.longitudinal ?? {}), loadSensN: params.loadSensN, loadSensRefFz: params.loadSensRefFz };
+
+  const Fx0 = pacejkaLongitudinal(slipRatio, mu, N, longCall);
+  const Fy0 = pacejkaLateral(slipAngle, mu, N, lateralCall);
 
   // razão combinada (envelope elíptico em α-κ space)
   const aNorm = slipAngle / ALPHA_PEAK;
@@ -183,8 +252,8 @@ export function combinedSlipForces(slipAngle, slipRatio, mu, N, params = {}) {
     return { Fx: Fx0, Fy: Fy0 };
   }
 
-  // fora do envelope: aplica círculo de fricção
-  const D = mu * N;
+  // fora do envelope: aplica círculo de fricção (D já com load sens sublinear)
+  const D = effectiveD(mu, N, params);
   const Fmag = Math.sqrt(Fx0 * Fx0 + Fy0 * Fy0);
   if (Fmag <= 1e-6) return { Fx: 0, Fy: 0 };
 

@@ -8,6 +8,7 @@ import {
   TIRE_COOL_RATE,
   TIRE_MAX_C,
 } from './Tire.js';
+import { SuspensionCorner } from './SuspensionCorner.js';
 
 export class Wheel {
   constructor(scene, offsetLocal, isFront, cfg) {
@@ -17,21 +18,37 @@ export class Wheel {
     this.isRear = !isFront;
     this.cfg = cfg;
 
-    // Pacejka params overridáveis via cfg (fallbacks no Tire.js)
+    // Pacejka params overridáveis via cfg (fallbacks no Tire.js).
+    // loadSensN/loadSensRefFz são mutados a cada chamada de updateTireForces
+    // para refletir mudanças runtime via TuningUI (cfg.loadSensN slider).
     this.tireParams = {
       lateral: cfg.pacejkaLateral,        // {B,C,E} ou undefined
       longitudinal: cfg.pacejkaLongitudinal,
       isRear: !isFront,
       driftBias: cfg.tireDriftBias ?? 0.4,
+      loadSensN: cfg.loadSensN ?? 0.85,
+      loadSensRefFz: cfg.loadSensRefFz ?? 3200,
     };
 
     this.compression = 0;
     this.prevCompression = 0;
     this.compressionSpeed = 0;
     this.suspensionForce = 0;
+    this.springForce = 0;
+    this.damperForce = 0;
+    this.bumpStopForce = 0;
+    this.droopForce = 0;
+    this.arbForce = 0;
+    this.geoLoad = 0;
+    this.tireVerticalForce = 0;
+    this.tireDeflection = 0;
     this.isGrounded = false;
+    this.hasGroundHit = false;
     this.hitDistance = 0;
     this.hitPoint = new THREE.Vector3();
+    this.groundY = 0;
+    this.anchorWorld = new THREE.Vector3();
+    this.suspension = new SuspensionCorner(cfg, isFront);
 
     // Surface-aware physics (Fase 5). Lido do mesh.userData.surfaceType no raycast,
     // multiplica mu efetivo via SURFACE_MU em updateTireForces.
@@ -54,27 +71,12 @@ export class Wheel {
 
     this.ray = new THREE.Raycaster();
     this.rayDown = new THREE.Vector3(0, -1, 0);
-    this.rayLen = cfg.suspRestLength + cfg.wheelRadius + 0.6;
+    this.rayLen = cfg.suspRestLength + cfg.suspMaxCompression + cfg.wheelRadius + cfg.suspRayExtra;
 
     this.mesh = new THREE.Group();
     this.mesh.position.copy(offsetLocal);
     this.mesh.position.y = offsetLocal.y - cfg.suspRestLength;
     scene.add(this.mesh);
-
-    const wr = cfg.wheelRadius;
-    const ww = cfg.wheelWidth;
-    const tireGeo = new THREE.CylinderGeometry(wr, wr, ww, 24, 1);
-    tireGeo.rotateZ(Math.PI / 2);
-    const tireMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.92, metalness: 0.05 });
-    this.tireMesh = new THREE.Mesh(tireGeo, tireMat);
-    this.tireMesh.castShadow = true;
-    this.mesh.add(this.tireMesh);
-
-    const rimGeo = new THREE.CylinderGeometry(wr * 0.72, wr * 0.72, ww * 1.02, 16, 1);
-    rimGeo.rotateZ(Math.PI / 2);
-    const rimMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.25, metalness: 0.85 });
-    this.rimMesh = new THREE.Mesh(rimGeo, rimMat);
-    this.tireMesh.add(this.rimMesh);
 
     this.dbgLineGeo = new THREE.BufferGeometry();
     this.dbgLinePos = new Float32Array(6);
@@ -84,59 +86,89 @@ export class Wheel {
     scene.add(this.dbgLine);
   }
 
-  updateSuspension(dt, carPos, carHeading, carPitch, carRoll, groundObjects) {
-    const c = this.cfg;
-    const cos = Math.cos(carHeading);
-    const sin = Math.sin(carHeading);
+  _updateAnchor(carPos, carHeading, carPitch, carRoll) {
+    const cosH = Math.cos(carHeading);
+    const sinH = Math.sin(carHeading);
+    const cosP = Math.cos(carPitch);
+    const sinP = Math.sin(carPitch);
+    const cosR = Math.cos(carRoll);
+    const sinR = Math.sin(carRoll);
     const lx = this.offsetLocal.x;
     const ly = this.offsetLocal.y;
     const lz = this.offsetLocal.z;
 
-    let wx = lx * cos + lz * sin;
-    let wz = -lx * sin + lz * cos;
-    let wy = ly;
+    const xRoll = lx * cosR + ly * sinR;
+    const yRoll = -lx * sinR + ly * cosR;
+    const yPitch = yRoll * cosP - lz * sinP;
+    const zPitch = yRoll * sinP + lz * cosP;
 
-    wx += wy * Math.sin(carRoll);
-    wy *= Math.cos(carRoll) * Math.cos(carPitch);
-    wz += wy * Math.sin(carPitch);
+    const wx = xRoll * cosH + zPitch * sinH;
+    const wz = -xRoll * sinH + zPitch * cosH;
+    this.anchorWorld.set(carPos.x + wx, carPos.y + yPitch, carPos.z + wz);
+  }
 
-    this.ray.ray.origin.set(carPos.x + wx, carPos.y + wy, carPos.z + wz);
+  _sampleGround(groundObjects) {
+    const c = this.cfg;
+    this.rayLen = c.suspRestLength + c.suspMaxCompression + c.wheelRadius + c.suspRayExtra;
+    this.ray.ray.origin.copy(this.anchorWorld);
     this.ray.ray.direction.copy(this.rayDown);
 
     const hits = this.ray.intersectObjects(groundObjects, false);
-    let compression = 0;
     if (hits.length > 0 && hits[0].distance <= this.rayLen) {
-      this.isGrounded = true;
+      this.hasGroundHit = true;
       this.hitDistance = hits[0].distance;
       this.hitPoint.copy(hits[0].point);
+      this.groundY = hits[0].point.y;
       this.currentSurface = hits[0].object.userData?.surfaceType ?? 'asphalt';
-      compression = c.suspRestLength - (this.hitDistance - c.wheelRadius);
-      if (compression < 0) compression = 0;
-      const maxComp = c.suspRestLength + 0.12;
-      if (compression > maxComp) compression = maxComp;
     } else {
-      this.isGrounded = false;
+      this.hasGroundHit = false;
       this.hitDistance = this.rayLen;
+      this.hitPoint.set(this.anchorWorld.x, this.anchorWorld.y - this.rayLen, this.anchorWorld.z);
+      this.groundY = this.hitPoint.y;
       this.currentSurface = 'asphalt';  // fallback no ar
-      compression = 0;
     }
+  }
 
-    this.compressionSpeed = (compression - this.prevCompression) / dt;
-    this.prevCompression = compression;
-    this.compression = compression;
+  _syncSuspensionState() {
+    const s = this.suspension;
+    this.prevCompression = s.prevCompression;
+    this.compression = s.compression;
+    this.compressionSpeed = s.compressionSpeed;
+    this.suspensionForce = s.suspensionForce;
+    this.springForce = s.springForce;
+    this.damperForce = s.damperForce;
+    this.bumpStopForce = s.bumpStopForce;
+    this.droopForce = s.droopForce;
+    this.arbForce = s.arbForce;
+    this.geoLoad = s.geoLoad;
+    this.tireVerticalForce = s.tireForce;
+    this.tireDeflection = s.tireDeflection;
+    this.normalLoad = s.normalLoad;
+    this.isGrounded = this.hasGroundHit && this.normalLoad > 1.0;
+  }
 
-    let force = c.springRate * compression + c.damperRate * this.compressionSpeed;
-    if (force < 0) force = 0;
-    this.suspensionForce = force;
-    this.normalLoad = this.isGrounded ? force : 0;
+  resetSuspension(carPos, carHeading, carPitch, carRoll, groundObjects) {
+    this._updateAnchor(carPos, carHeading, carPitch, carRoll);
+    this._sampleGround(groundObjects);
+    this.suspension.reset(this.anchorWorld.y, this.hasGroundHit ? this.groundY : 0);
+    this._syncSuspensionState();
+    this.mesh.position.set(this.anchorWorld.x, this.suspension.wheelY, this.anchorWorld.z);
+    this._updateDebug();
+  }
 
-    if (this.isGrounded) {
-      this.mesh.position.set(this.ray.ray.origin.x, this.hitPoint.y + c.wheelRadius, this.ray.ray.origin.z);
-    } else {
-      this.mesh.position.set(this.ray.ray.origin.x, this.ray.ray.origin.y - c.suspRestLength, this.ray.ray.origin.z);
-    }
+  updateSuspension(dt, carPos, carHeading, carPitch, carRoll, groundObjects) {
+    this._updateAnchor(carPos, carHeading, carPitch, carRoll);
+    this._sampleGround(groundObjects);
+    this.suspension.update(dt, this.anchorWorld.y, this.groundY, this.hasGroundHit);
+    this._syncSuspensionState();
+    this.mesh.position.set(this.anchorWorld.x, this.suspension.wheelY, this.anchorWorld.z);
 
     this._updateDebug();
+  }
+
+  applySuspensionLoads(arbForce, geoLoad = 0) {
+    this.suspension.applyLoads(arbForce, geoLoad, this.hasGroundHit);
+    this._syncSuspensionState();
   }
 
   _updateDebug() {
@@ -191,7 +223,10 @@ export class Wheel {
     }
     this.slipRatio = Math.max(-1.0, Math.min(1.0, this.slipRatio));
 
-    // ---- Pacejka Magic Formula + círculo de fricção (combined slip)
+    // ---- Pacejka Magic Formula + círculo de fricção (combined slip).
+    // Sync params de load sensitivity vivos do cfg (TuningUI muta cfg.loadSensN runtime).
+    this.tireParams.loadSensN = c.loadSensN ?? this.tireParams.loadSensN;
+    this.tireParams.loadSensRefFz = c.loadSensRefFz ?? this.tireParams.loadSensRefFz;
     const { Fx: F_long_pacejka, Fy: F_lat } = combinedSlipForces(
       this.slipAngle,
       this.slipRatio,

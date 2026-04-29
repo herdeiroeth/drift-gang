@@ -316,6 +316,47 @@ export class TuningUI {
         if (this.car.powertrain?.turbo) this.car.powertrain.turbo.maxBoost = v;
       });
 
+    // ----- Tire / SAT (Sprint 1: load sensitivity + kingpin) -----
+    body.appendChild(this._mkSection('Tire / SAT'));
+    // Load sensitivity expoente: 1.0 = arcade (linear), 0.85 = realista street.
+    this._mkSlider(body, 'loadSensN', 'Tire Load Sens. n', 0.65, 1.00, 0.01, 2,
+      v => { if (this.car.cfg) this.car.cfg.loadSensN = v; });
+    // Caster em °: drift cars 7-12°. Recomputa mechTrail = R·sin(caster).
+    this._mkSlider(body, 'casterDeg', 'Caster Angle (°)', 1, 12, 0.5, 1,
+      v => {
+        const cfg = this.car.cfg;
+        if (!cfg) return;
+        cfg.casterAngle = v * Math.PI / 180;
+        cfg.mechTrail = cfg.wheelRadius * Math.sin(cfg.casterAngle);
+      });
+    // Pneumatic trail máximo (mm). Faixa real 20-60mm.
+    this._mkSlider(body, 'pneumTrailMM', 'Pneumatic Trail (mm)', 10, 80, 1, 0,
+      v => { if (this.car.cfg) this.car.cfg.pneumTrail0 = v / 1000; });
+    // Ganho do SAT input-side (countersteer assist). Alto = volante mais "vivo".
+    this._mkSlider(body, 'steerSatGain', 'SAT Input Gain', 0.0001, 0.003, 0.0001, 4,
+      v => { if (this.car.cfg) this.car.cfg.steerSatGain = v; });
+
+    // ----- Suspension AAA-lite -----
+    body.appendChild(this._mkSection('Suspension'));
+    this._mkSlider(body, 'rideHeightMM', 'Ride Height / Rest (mm)', 240, 420, 5, 0,
+      v => { if (this.car.cfg) this.car.cfg.suspRestLength = v / 1000; });
+    this._mkSlider(body, 'springFrontKN', 'Spring Front (kN/m)', 30, 80, 1, 0,
+      v => { if (this.car.cfg) this.car.cfg.springRateFront = v * 1000; });
+    this._mkSlider(body, 'springRearKN', 'Spring Rear (kN/m)', 30, 80, 1, 0,
+      v => { if (this.car.cfg) this.car.cfg.springRateRear = v * 1000; });
+    this._mkSlider(body, 'bumpFront', 'Damper Bump F', 1500, 8000, 100, 0,
+      v => { if (this.car.cfg) this.car.cfg.damperBumpFront = v; });
+    this._mkSlider(body, 'bumpRear', 'Damper Bump R', 1500, 8000, 100, 0,
+      v => { if (this.car.cfg) this.car.cfg.damperBumpRear = v; });
+    this._mkSlider(body, 'reboundFront', 'Damper Rebound F', 2500, 12000, 100, 0,
+      v => { if (this.car.cfg) this.car.cfg.damperReboundFront = v; });
+    this._mkSlider(body, 'reboundRear', 'Damper Rebound R', 2500, 12000, 100, 0,
+      v => { if (this.car.cfg) this.car.cfg.damperReboundRear = v; });
+    this._mkSlider(body, 'arbFrontKN', 'ARB Front (kN/m)', 0, 30, 1, 0,
+      v => { if (this.car.cfg) this.car.cfg.antiRollFront = v * 1000; });
+    this._mkSlider(body, 'arbRearKN', 'ARB Rear (kN/m)', 0, 30, 1, 0,
+      v => { if (this.car.cfg) this.car.cfg.antiRollRear = v * 1000; });
+
     // ----- ECU programável (tipo FuelTech) -----
     body.appendChild(this._mkSection('ECU ▸ Shift Map (per gear)'));
     // 1ª (idx=2) sobe pra 2ª etc. Última transição é 5ª↔6ª (idx=6).
@@ -537,6 +578,23 @@ export class TuningUI {
     if (pt?.engine) this.controls.engineInertia?.set(pt.engine.inertia ?? 0.18);
     if (pt?.turbo) this.controls.turboMaxBoost?.set(pt.turbo.maxBoost ?? 0);
 
+    // Tire / SAT (Sprint 1)
+    this.controls.loadSensN?.set(cfg.loadSensN ?? 0.85);
+    this.controls.casterDeg?.set((cfg.casterAngle ?? 0.10) * 180 / Math.PI);
+    this.controls.pneumTrailMM?.set((cfg.pneumTrail0 ?? 0.040) * 1000);
+    this.controls.steerSatGain?.set(cfg.steerSatGain ?? 0.0008);
+
+    // Suspension
+    this.controls.rideHeightMM?.set((cfg.suspRestLength ?? 0.32) * 1000);
+    this.controls.springFrontKN?.set((cfg.springRateFront ?? cfg.springRate ?? 52000) / 1000);
+    this.controls.springRearKN?.set((cfg.springRateRear ?? cfg.springRate ?? 48000) / 1000);
+    this.controls.bumpFront?.set(cfg.damperBumpFront ?? cfg.damperRate ?? 4200);
+    this.controls.bumpRear?.set(cfg.damperBumpRear ?? cfg.damperRate ?? 3900);
+    this.controls.reboundFront?.set(cfg.damperReboundFront ?? cfg.damperRate ?? 6800);
+    this.controls.reboundRear?.set(cfg.damperReboundRear ?? cfg.damperRate ?? 6200);
+    this.controls.arbFrontKN?.set((cfg.antiRollFront ?? 13000) / 1000);
+    this.controls.arbRearKN?.set((cfg.antiRollRear ?? 10500) / 1000);
+
     // ECU sliders
     const ecu = pt?.ecu;
     if (ecu) {
@@ -579,6 +637,17 @@ export class TuningUI {
       brakeBiasFront: c.cfg?.brakeBiasFront ?? 0.62,
       engineInertia: pt.engine?.inertia ?? 0.18,
       turboMaxBoost: pt.turbo?.maxBoost ?? 0,
+      suspension: {
+        suspRestLength: c.cfg?.suspRestLength ?? 0.32,
+        springRateFront: c.cfg?.springRateFront ?? 52000,
+        springRateRear: c.cfg?.springRateRear ?? 48000,
+        damperBumpFront: c.cfg?.damperBumpFront ?? 4200,
+        damperBumpRear: c.cfg?.damperBumpRear ?? 3900,
+        damperReboundFront: c.cfg?.damperReboundFront ?? 6800,
+        damperReboundRear: c.cfg?.damperReboundRear ?? 6200,
+        antiRollFront: c.cfg?.antiRollFront ?? 13000,
+        antiRollRear: c.cfg?.antiRollRear ?? 10500,
+      },
     };
   }
 
@@ -671,6 +740,19 @@ export class TuningUI {
 
     if (typeof d.turboMaxBoost === 'number' && pt?.turbo) {
       pt.turbo.maxBoost = d.turboMaxBoost;
+    }
+
+    if (d.suspension && c.cfg) {
+      const s = d.suspension;
+      if (typeof s.suspRestLength === 'number') c.cfg.suspRestLength = s.suspRestLength;
+      if (typeof s.springRateFront === 'number') c.cfg.springRateFront = s.springRateFront;
+      if (typeof s.springRateRear === 'number') c.cfg.springRateRear = s.springRateRear;
+      if (typeof s.damperBumpFront === 'number') c.cfg.damperBumpFront = s.damperBumpFront;
+      if (typeof s.damperBumpRear === 'number') c.cfg.damperBumpRear = s.damperBumpRear;
+      if (typeof s.damperReboundFront === 'number') c.cfg.damperReboundFront = s.damperReboundFront;
+      if (typeof s.damperReboundRear === 'number') c.cfg.damperReboundRear = s.damperReboundRear;
+      if (typeof s.antiRollFront === 'number') c.cfg.antiRollFront = s.antiRollFront;
+      if (typeof s.antiRollRear === 'number') c.cfg.antiRollRear = s.antiRollRear;
     }
   }
 }

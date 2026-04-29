@@ -1,3 +1,5 @@
 import { Game } from './core/Game.js';
 
-new Game();
+Game.create().catch((err) => {
+  console.error('Fatal Game.create error:', err);
+});
