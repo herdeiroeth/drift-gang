@@ -5,7 +5,7 @@ import { WheelAssembly } from './WheelAssembly.js';
 import { buildDifferential } from './parts/Differential.js';
 import { buildSwayBar, HalfShaft } from './parts/Axle.js';
 import { SuspensionLinkage } from './parts/SuspensionLinkage.js';
-import { extractAndReparentWheels } from './loaders/extractWheels.js';
+import { extractAndReparentWheels, measureWheelLayoutFromGltf } from './loaders/extractWheels.js';
 import { inspectGltf, isDebugEnabled } from './loaders/inspectGltf.js';
 import { VISUAL_CFG } from './CarVisualConfig.js';
 
@@ -14,15 +14,15 @@ import { VISUAL_CFG } from './CarVisualConfig.js';
 // Modos:
 //   - GLB body (default quando opts.gltfScene fornecido E VISUAL_CFG.gltfBody.enabled)
 //       buildChassisFromGltf + extractAndReparentWheels (rodas do GLB nos wheel.mesh).
-//       Mantém drivetrain procedural (diff/halfshafts/swaybars) e suspension linkages
-//       por baixo da carroceria — reforça identidade "drift com mecânica exposta".
+//       Mantém o restante do asset GLB visível; suspensão/drivetrain procedural
+//       só entram se VISUAL_CFG.gltfBody.showProceduralUndercarriage=true.
 //   - Procedural fallback (sem GLB)
 //       buildChassis (BoxGeometry) + WheelAssembly procedural — visual original.
 //
 // Hierarquia em ambos os modos:
 //   car.mesh
 //     ├── chassis (procedural OU GLB)
-//     ├── drivetrain (diff/halfshafts/swaybars/linkages) — sempre procedural
+//     ├── drivetrain (procedural apenas em fallback/debug)
 //   wheel.mesh × 4
 //     └── wheelHub (GLB) OU WheelAssembly (procedural)
 export class CarVisuals {
@@ -35,6 +35,8 @@ export class CarVisuals {
     this.mode = useGltf ? 'gltf' : 'procedural';
     this.gltfWheelHubs = null;
     this.wheelAssemblies = null;
+    this.halfShafts = [];
+    this.linkages = [];
 
     if (useGltf) {
       const gltfScene = opts.gltfScene;
@@ -46,7 +48,12 @@ export class CarVisuals {
         scaleFactor:    cfg.scaleFactor,
         forwardSign:    cfg.forwardSign,
         applyClearcoat: cfg.applyClearcoat,
+        targetLength:   opts.gltfTargetLength,
       });
+
+      if (cfg.alignWheelWellsToPhysics) {
+        alignWheelWellsToPhysics(chassis.gltfRoot, car);
+      }
 
       let extraction = { ok: false };
       if (cfg.useGltfWheels) {
@@ -67,7 +74,10 @@ export class CarVisuals {
       this.wheelAssemblies = car.wheels.map((w) => new WheelAssembly(w));
     }
 
-    // Drivetrain procedural — sempre presente
+    const useProceduralUndercarriage = !useGltf || cfg.showProceduralUndercarriage;
+    if (!useProceduralUndercarriage) return;
+
+    // Drivetrain/suspensão procedural — fallback ou debug visual.
     const c = car.cfg;
     const rearAxleZ  = -c.cgToRearAxle;
     const frontAxleZ =  c.cgToFrontAxle;
@@ -123,4 +133,16 @@ export class CarVisuals {
     for (const hs of this.halfShafts) hs.update(dt);
     for (const lk of this.linkages) lk.update();
   }
+}
+
+function alignWheelWellsToPhysics(gltfRoot, car) {
+  const layout = measureWheelLayoutFromGltf(gltfRoot);
+  if (!layout) return;
+
+  const physicalMidZ = (car.cfg.cgToFrontAxle - car.cfg.cgToRearAxle) * 0.5;
+  const dz = physicalMidZ - layout.axleMidZ;
+  if (Math.abs(dz) < 1e-4) return;
+
+  gltfRoot.position.z += dz;
+  gltfRoot.updateMatrixWorld(true);
 }

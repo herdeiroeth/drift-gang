@@ -5,6 +5,9 @@ import { PowertrainSystem } from '../powertrain.js';
 import { GAME_CFG, PHYSICS_CFG } from '../core/constants.js';
 import { CarVisuals } from '../rendering/car/CarVisuals.js';
 import { pneumaticTrail } from './Tire.js';
+import { VISUAL_CFG } from '../rendering/car/CarVisualConfig.js';
+import { buildChassisFromGltf } from '../rendering/car/ChassisGltf.js';
+import { measureWheelLayoutFromGltf } from '../rendering/car/loaders/extractWheels.js';
 
 export class Car {
   constructor(scene, groundObjects, opts = {}) {
@@ -16,6 +19,9 @@ export class Car {
 
     this.config = new CarConfig();
     this.cfg = this.config;
+    this.gltfTargetLength = this.cfg.wheelBase * VISUAL_CFG.gltfBody.scaleFactor;
+    this.gltfWheelLayout = this._measureGltfWheelLayout(this.opts.gltfScene);
+    this._applyGltfWheelLayout(this.gltfWheelLayout);
 
     this.position = new THREE.Vector3(0, 1.0, 0);
     this.velocity = new THREE.Vector3();
@@ -133,10 +139,48 @@ export class Car {
       w.resetSuspension(this.position, this.heading, this.pitch, this.roll, this.groundObjects);
     }
 
-    this.visuals = new CarVisuals(scene, this, this.opts);
+    this.visuals = new CarVisuals(scene, this, {
+      ...this.opts,
+      gltfTargetLength: this.gltfTargetLength,
+    });
   }
 
   wheelWorld(i) { return this.wheels[i].getWorldPosition(); }
+
+  _measureGltfWheelLayout(gltfScene) {
+    const cfg = VISUAL_CFG.gltfBody;
+    if (!cfg.enabled || !cfg.useGltfWheels || !cfg.syncWheelGeometryFromGltf || !gltfScene) {
+      return null;
+    }
+
+    const measureScene = gltfScene.clone(true);
+    const measureRoot = new THREE.Group();
+    buildChassisFromGltf(measureRoot, measureScene, {
+      car: this,
+      scaleFactor: cfg.scaleFactor,
+      forwardSign: cfg.forwardSign,
+      applyClearcoat: false,
+      targetLength: this.gltfTargetLength,
+      enhanceMaterials: false,
+    });
+    return measureWheelLayoutFromGltf(measureScene);
+  }
+
+  _applyGltfWheelLayout(layout) {
+    if (!layout) return;
+
+    const c = this.cfg;
+    if (Number.isFinite(layout.halfWidth) && layout.halfWidth > 0.2) {
+      c.halfWidth = layout.halfWidth;
+    }
+    if (Number.isFinite(layout.wheelRadius) && layout.wheelRadius > 0.15) {
+      c.wheelRadius = layout.wheelRadius;
+    }
+    if (Number.isFinite(layout.wheelWidth) && layout.wheelWidth > 0.08) {
+      c.wheelWidth = layout.wheelWidth;
+    }
+    c.syncDerivedGeometry();
+  }
 
   computeStaticRideHeight() {
     const c = this.cfg;

@@ -83,6 +83,8 @@ export class Wheel {
     this.dbgLineGeo.setAttribute('position', new THREE.BufferAttribute(this.dbgLinePos, 3));
     this.dbgLine = new THREE.Line(this.dbgLineGeo, new THREE.LineBasicMaterial({ color: 0x00ff00 }));
     this.dbgLine.frustumCulled = false;
+    this.debugVisible = false;
+    this.dbgLine.visible = false;
     scene.add(this.dbgLine);
   }
 
@@ -273,7 +275,12 @@ export class Wheel {
 
   setVisible(v) {
     this.mesh.visible = v;
-    this.dbgLine.visible = v;
+    this.dbgLine.visible = v && this.debugVisible;
+  }
+
+  setDebugVisible(v) {
+    this.debugVisible = v;
+    this.dbgLine.visible = v && this.mesh.visible;
   }
 
   getWorldPosition() {

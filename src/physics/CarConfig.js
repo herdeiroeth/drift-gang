@@ -102,26 +102,53 @@ export class CarConfig {
     this.maxBodyPitch = opts.maxBodyPitch ?? 0.22;
     this.maxBodyRoll = opts.maxBodyRoll ?? 0.26;
 
-    this.inertia = this.mass * this.inertiaScale;
-    this.wheelBase = this.cgToFrontAxle + this.cgToRearAxle;
-    this.axleWeightRatioFront = this.cgToRearAxle / this.wheelBase;
-    this.axleWeightRatioRear = this.cgToFrontAxle / this.wheelBase;
-    this.trackWidth = this.halfWidth * 2;
-    this.pitchInertia = opts.pitchInertia ?? (this.sprungMass * this.wheelBase * this.wheelBase * 0.28);
-    this.rollInertia = opts.rollInertia ?? (this.sprungMass * this.trackWidth * this.trackWidth * 0.42);
-    this.staticSuspCompressionFront = (this.sprungMass * this.gravity * this.axleWeightRatioFront * 0.5) / this.springRateFront;
-    this.staticSuspCompressionRear = (this.sprungMass * this.gravity * this.axleWeightRatioRear * 0.5) / this.springRateRear;
-    this.staticTireDeflection = ((this.mass * this.gravity) / 4) / this.tireVerticalRate;
+    this._pitchInertiaOverride = typeof opts.pitchInertia === 'number';
+    this._rollInertiaOverride = typeof opts.rollInertia === 'number';
+    this._loadSensRefFzOverride = typeof opts.loadSensRefFz === 'number';
+
+    this.inertia = 0;
+    this.wheelBase = 0;
+    this.axleWeightRatioFront = 0;
+    this.axleWeightRatioRear = 0;
+    this.trackWidth = 0;
+    this.pitchInertia = opts.pitchInertia ?? 0;
+    this.rollInertia = opts.rollInertia ?? 0;
+    this.staticSuspCompressionFront = 0;
+    this.staticSuspCompressionRear = 0;
+    this.staticTireDeflection = 0;
 
     // Carga normal estática por canto = m·g/4. Usada como referência da
     // load sensitivity sublinear: Fy/Fx ~= mu·N·(N/ref)^(n-1) cruza com
     // (mu·N) exatamente em N=ref. Carros mais pesados/leves têm seu ref
     // ajustado automaticamente.
-    this.loadSensRefFz = opts.loadSensRefFz ?? (this.mass * this.gravity / 4);
+    this.loadSensRefFz = opts.loadSensRefFz ?? 0;
 
     // Mech trail (caster trail) — distância horizontal do contact patch
     // ao eixo do kingpin, derivada da geometria: R·sin(caster).
     // Sob Fy, gera M_kingpin = Fy·trail que tenta voltar o volante ao centro.
+    this.mechTrail = 0;
+    this.syncDerivedGeometry();
+  }
+
+  syncDerivedGeometry() {
+    this.wheelInertia = 0.5 * this.wheelMass * this.wheelRadius * this.wheelRadius;
+    this.inertia = this.mass * this.inertiaScale;
+    this.wheelBase = this.cgToFrontAxle + this.cgToRearAxle;
+    this.axleWeightRatioFront = this.cgToRearAxle / Math.max(0.001, this.wheelBase);
+    this.axleWeightRatioRear = this.cgToFrontAxle / Math.max(0.001, this.wheelBase);
+    this.trackWidth = this.halfWidth * 2;
+    if (!this._pitchInertiaOverride) {
+      this.pitchInertia = this.sprungMass * this.wheelBase * this.wheelBase * 0.28;
+    }
+    if (!this._rollInertiaOverride) {
+      this.rollInertia = this.sprungMass * this.trackWidth * this.trackWidth * 0.42;
+    }
+    this.staticSuspCompressionFront = (this.sprungMass * this.gravity * this.axleWeightRatioFront * 0.5) / this.springRateFront;
+    this.staticSuspCompressionRear = (this.sprungMass * this.gravity * this.axleWeightRatioRear * 0.5) / this.springRateRear;
+    this.staticTireDeflection = ((this.mass * this.gravity) / 4) / this.tireVerticalRate;
+    if (!this._loadSensRefFzOverride) {
+      this.loadSensRefFz = this.mass * this.gravity / 4;
+    }
     this.mechTrail = this.wheelRadius * Math.sin(this.casterAngle);
   }
 }

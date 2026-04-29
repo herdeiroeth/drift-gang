@@ -22,6 +22,13 @@ export const VISUAL_CFG = {
     // Habilita extração das rodas do GLB pra reparentar nos wheel.mesh físicos.
     // Se false, esconde as rodas do GLB (se detectadas) e usa WheelAssembly procedural.
     useGltfWheels:    true,
+    // Usa o layout real das rodas do GLB para calibrar track/radius visual da física.
+    syncWheelGeometryFromGltf: true,
+    // Centraliza os wheel wells do GLB no eixo físico atual antes de extrair as rodas.
+    alignWheelWellsToPhysics: true,
+    // Debug/legado: desenhar suspensão/drivetrain procedural por cima do GLB.
+    // Default false para usar a mecânica visível que já vem no asset.
+    showProceduralUndercarriage: false,
     // Esconde body procedural mesmo se GLB falhar. Default false: melhor ter
     // car procedural visível do que carro invisível.
     hideProceduralOnFail: false,

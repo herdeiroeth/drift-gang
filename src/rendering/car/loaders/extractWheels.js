@@ -15,37 +15,17 @@ import * as THREE from 'three';
 //
 // Retorna { ok: bool, wheelGroups?: [hub × 4] }.
 export function extractAndReparentWheels(gltfRoot, wheels) {
-  gltfRoot.updateMatrixWorld(true);
-
-  // Bbox global do carro pra estabelecer centro e referenciar quadrantes
-  const carBbox  = new THREE.Box3().setFromObject(gltfRoot);
-  const carCenter = new THREE.Vector3(); carBbox.getCenter(carCenter);
-  const carSize   = new THREE.Vector3(); carBbox.getSize(carSize);
-
-  // Coletar candidates: nodes (top-level e netos) com bbox compatível com
-  // componente de roda e centro em quadrante "de canto" do carro.
-  const candidates = collectWheelComponents(gltfRoot, carCenter, carSize);
-
-  if (candidates.length < 4) {
-    console.warn('[extractWheels] Found only', candidates.length, 'wheel components. Falling back to procedural.');
+  const wheelSet = collectWheelBuckets(gltfRoot);
+  if (!wheelSet.ok) {
+    if (wheelSet.reason === 'few-candidates') {
+      console.warn('[extractWheels] Found only', wheelSet.candidates.length, 'wheel components. Falling back to procedural.');
+    } else {
+      console.warn('[extractWheels] Empty quadrants:', wheelSet.empty.join(', '), 'Found:',
+        wheelSet.candidates.map(c => c.node.name));
+    }
     return { ok: false };
   }
-
-  // Mapear cada candidato pra quadrante FL/FR/RL/RR pelo sinal de centro
-  const buckets = { fl: [], fr: [], rl: [], rr: [] };
-  for (const cand of candidates) {
-    const dx = cand.center.x - carCenter.x;
-    const dz = cand.center.z - carCenter.z;
-    const key = (dz > 0 ? 'f' : 'r') + (dx < 0 ? 'l' : 'r');
-    buckets[key].push(cand);
-  }
-
-  const empty = ['fl', 'fr', 'rl', 'rr'].filter(k => buckets[k].length === 0);
-  if (empty.length > 0) {
-    console.warn('[extractWheels] Empty quadrants:', empty.join(', '), 'Found:',
-      candidates.map(c => c.node.name));
-    return { ok: false };
-  }
+  const { buckets } = wheelSet;
 
   // Mapping físico: wheels[0]=FL, [1]=FR, [2]=RL, [3]=RR (ver Car.js:120-125)
   const physMap = [
@@ -66,6 +46,48 @@ export function extractAndReparentWheels(gltfRoot, wheels) {
   return { ok: true, wheelGroups };
 }
 
+export function measureWheelLayoutFromGltf(gltfRoot) {
+  const wheelSet = collectWheelBuckets(gltfRoot);
+  if (!wheelSet.ok) return null;
+
+  const centers = {
+    fl: combinedBounds(wheelSet.buckets.fl).center,
+    fr: combinedBounds(wheelSet.buckets.fr).center,
+    rl: combinedBounds(wheelSet.buckets.rl).center,
+    rr: combinedBounds(wheelSet.buckets.rr).center,
+  };
+  const sizes = {
+    fl: combinedBounds(wheelSet.buckets.fl).size,
+    fr: combinedBounds(wheelSet.buckets.fr).size,
+    rl: combinedBounds(wheelSet.buckets.rl).size,
+    rr: combinedBounds(wheelSet.buckets.rr).size,
+  };
+
+  const halfWidth = (
+    Math.abs(centers.fl.x) +
+    Math.abs(centers.fr.x) +
+    Math.abs(centers.rl.x) +
+    Math.abs(centers.rr.x)
+  ) * 0.25;
+  const frontAxleZ = (centers.fl.z + centers.fr.z) * 0.5;
+  const rearAxleZ  = (centers.rl.z + centers.rr.z) * 0.5;
+
+  const wheelDims = Object.values(sizes).map(wheelDimensionsFromSize);
+  const avg = (key) => wheelDims.reduce((sum, dim) => sum + dim[key], 0) / wheelDims.length;
+
+  return {
+    centers,
+    sizes,
+    halfWidth,
+    frontAxleZ,
+    rearAxleZ,
+    axleMidZ: (frontAxleZ + rearAxleZ) * 0.5,
+    wheelBase: frontAxleZ - rearAxleZ,
+    wheelRadius: avg('radius'),
+    wheelWidth: avg('width'),
+  };
+}
+
 // Coleta nodes que compõem o conjunto da roda (pneu, aro, hub, disco, caliper).
 // Filtros em ordem:
 //   1. EXCLUDE_NAME: rejeita nomes claramente NÃO-roda (faróis, fenders, mudflaps,
@@ -78,6 +100,39 @@ export function extractAndReparentWheels(gltfRoot, wheels) {
 const INCLUDE_NAME = /(wheel|tire|tyre|rim|brakedisc|brake_disc|caliper|rotor|hub_assembly|hubcap|whl)/i;
 const EXCLUDE_NAME = /(headlight|head_light|taillight|tail_light|fender|mudflap|spoiler|trim|grill|interior|seat|window|glass|mirror|plate|exhaust|antenna|body|chassis|door|hood|bumper|skirt|sticker|decal|emblem|logo_body|engine|trunk|sunroof)/i;
 const NEUTRAL_NAME = /^(object_|mesh_|node_|untitled)/i;
+
+function collectWheelBuckets(gltfRoot) {
+  gltfRoot.updateMatrixWorld(true);
+
+  // Bbox global do carro pra estabelecer centro e referenciar quadrantes
+  const carBbox  = new THREE.Box3().setFromObject(gltfRoot);
+  const carCenter = new THREE.Vector3(); carBbox.getCenter(carCenter);
+  const carSize   = new THREE.Vector3(); carBbox.getSize(carSize);
+
+  // Coletar candidates: nodes (top-level e netos) com bbox compatível com
+  // componente de roda e centro em quadrante "de canto" do carro.
+  const candidates = collectWheelComponents(gltfRoot, carCenter, carSize);
+
+  if (candidates.length < 4) {
+    return { ok: false, reason: 'few-candidates', candidates };
+  }
+
+  // Mapear cada candidato pra quadrante FL/FR/RL/RR pelo sinal de centro
+  const buckets = { fl: [], fr: [], rl: [], rr: [] };
+  for (const cand of candidates) {
+    const dx = cand.center.x - carCenter.x;
+    const dz = cand.center.z - carCenter.z;
+    const key = (dz > 0 ? 'f' : 'r') + (dx < 0 ? 'l' : 'r');
+    buckets[key].push(cand);
+  }
+
+  const empty = ['fl', 'fr', 'rl', 'rr'].filter(k => buckets[k].length === 0);
+  if (empty.length > 0) {
+    return { ok: false, reason: 'empty-buckets', empty, candidates };
+  }
+
+  return { ok: true, buckets, candidates, carCenter, carSize };
+}
 
 function collectWheelComponents(root, carCenter, carSize) {
   const out = [];
@@ -153,18 +208,8 @@ function collectWheelComponents(root, carCenter, carSize) {
 // preservando scale herdada do gltfRoot. Componentes ficam centrados no hub.
 function buildWheelHub(candList, physWheel) {
   // 1) Bbox combinado de todos os componentes do cluster
-  const combined = new THREE.Box3();
-  let any = false;
-  for (const c of candList) {
-    const b = new THREE.Box3().setFromObject(c.node);
-    if (isFinite(b.min.x)) {
-      combined.union(b);
-      any = true;
-    }
-  }
-  if (!any) return null;
-  const center = new THREE.Vector3(); combined.getCenter(center);
-  const size   = new THREE.Vector3(); combined.getSize(size);
+  const { center, size, ok } = combinedBounds(candList);
+  if (!ok) return null;
 
   // 2) Hub vai pra wheel.mesh
   const hub = new THREE.Group();
@@ -208,4 +253,32 @@ function detectSpinAxis(size) {
     { axis: 'z', val: size.z },
   ].sort((a, b) => a.val - b.val);
   return arr[0].axis;
+}
+
+function combinedBounds(candList) {
+  const combined = new THREE.Box3();
+  let any = false;
+  for (const c of candList) {
+    const b = new THREE.Box3().setFromObject(c.node);
+    if (isFinite(b.min.x)) {
+      combined.union(b);
+      any = true;
+    }
+  }
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  if (any) {
+    combined.getCenter(center);
+    combined.getSize(size);
+  }
+  return { ok: any, center, size };
+}
+
+function wheelDimensionsFromSize(size) {
+  const spinAxis = detectSpinAxis(size);
+  const dims = { x: size.x, y: size.y, z: size.z };
+  const width = dims[spinAxis];
+  const radialAxes = ['x', 'y', 'z'].filter(axis => axis !== spinAxis);
+  const diameter = Math.max(dims[radialAxes[0]], dims[radialAxes[1]]);
+  return { width, radius: diameter * 0.5 };
 }

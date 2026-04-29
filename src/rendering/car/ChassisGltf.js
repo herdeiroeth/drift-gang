@@ -8,7 +8,14 @@ import * as THREE from 'three';
 // Retorna metadata útil pro extractor de rodas (que precisa dos mesmos
 // números de scale/orientação pra mapear FL/FR/RL/RR corretamente).
 export function buildChassisFromGltf(parent, gltfScene, ctx) {
-  const { car, scaleFactor = 1.55, forwardSign = +1, applyClearcoat = true } = ctx;
+  const {
+    car,
+    scaleFactor = 1.55,
+    forwardSign = +1,
+    applyClearcoat = true,
+    targetLength = null,
+    enhanceMaterials = true,
+  } = ctx;
 
   // 1) Bbox antes de qualquer transform — referencial do GLB original
   const bboxRaw = new THREE.Box3().setFromObject(gltfScene);
@@ -19,8 +26,8 @@ export function buildChassisFromGltf(parent, gltfScene, ctx) {
   //    bata com wheelBase * scaleFactor (~ comprimento total típico carro).
   //    Usar o eixo mais longo é robusto a GLBs exportados em qualquer eixo.
   const longest = Math.max(sizeRaw.x, sizeRaw.y, sizeRaw.z);
-  const targetLength = car.cfg.wheelBase * scaleFactor;
-  const scale = targetLength / longest;
+  const resolvedTargetLength = targetLength ?? car.cfg.wheelBase * scaleFactor;
+  const scale = resolvedTargetLength / longest;
   gltfScene.scale.setScalar(scale);
 
   // 3) Inverter forward se modelo veio com -Z forward (Blender padrão)
@@ -47,7 +54,7 @@ export function buildChassisFromGltf(parent, gltfScene, ctx) {
     if (!node.isMesh) return;
     node.castShadow = true;
     node.receiveShadow = true;
-    if (node.material) enhanceMaterial(node.material, applyClearcoat);
+    if (enhanceMaterials && node.material) enhanceMaterial(node.material, applyClearcoat);
   });
 
   parent.add(gltfScene);
