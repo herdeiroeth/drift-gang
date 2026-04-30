@@ -120,35 +120,39 @@ function enhanceSingleMaterial(mat, applyClearcoat, cache, nodeName = '') {
     // Opacity + environment reflection gives the right read for car glass here.
     m.transmission = 0;
     m.thickness = 0;
-    m.envMapIntensity = Math.max(m.envMapIntensity ?? 1, 1.65);
+    m.envMapIntensity = clamp(m.envMapIntensity ?? 1.0, 1.0, 1.35);
   } else if (applyClearcoat && isPaint && (!isMetalTrim || isMainPaint) && !isLight) {
     m = toPhysicalMaterial(m);
-    m.roughness = Math.max(0.14, Math.min(m.roughness ?? 0.28, 0.32));
+    m.roughness = Math.max(0.22, Math.min(m.roughness ?? 0.28, 0.36));
     m.metalness = Math.max(m.metalness ?? 0, 0.12);
     m.clearcoat = Math.max(m.clearcoat ?? 0, 0.92);
-    m.clearcoatRoughness = Math.min(m.clearcoatRoughness ?? 0.08, 0.12);
-    m.envMapIntensity = Math.max(m.envMapIntensity ?? 1, 1.75);
+    m.clearcoatRoughness = Math.max(0.18, Math.min(m.clearcoatRoughness ?? 0.18, 0.24));
+    m.envMapIntensity = clamp(m.envMapIntensity ?? 1.0, 1.0, 1.45);
     if ('specularIntensity' in m) m.specularIntensity = Math.max(m.specularIntensity ?? 1, 1.1);
   } else if (isCarbon) {
     m.roughness = Math.max(0.24, Math.min(m.roughness ?? 0.36, 0.5));
     m.metalness = Math.min(m.metalness ?? 0.2, 0.35);
-    if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.25);
+    if (m.envMapIntensity != null) m.envMapIntensity = clamp(m.envMapIntensity, 1.0, 1.2);
   } else if (isRubber) {
     m.roughness = Math.max(m.roughness ?? 0.85, 0.9);
     m.metalness = Math.min(m.metalness ?? 0.02, 0.02);
     if (m.envMapIntensity != null) m.envMapIntensity = Math.min(m.envMapIntensity, 0.65);
   } else if (isMetalTrim) {
-    m.roughness = Math.min(m.roughness ?? 0.32, 0.42);
+    m.roughness = Math.max(0.45, Math.min(m.roughness ?? 0.45, 0.62));
     m.metalness = Math.max(m.metalness ?? 0.65, 0.7);
-    if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.35);
+    if (m.envMapIntensity != null) m.envMapIntensity = clamp(m.envMapIntensity, 1.0, 1.2);
   }
 
   ensureCarLightMaterial(m, lightRole);
 
-  if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.0);
+  if (m.envMapIntensity != null && !isRubber) m.envMapIntensity = Math.max(m.envMapIntensity, 1.0);
   m.needsUpdate = true;
   cache.set(mat, m);
   return m;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(value, max));
 }
 
 function toPhysicalMaterial(mat) {

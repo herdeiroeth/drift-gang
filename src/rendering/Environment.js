@@ -148,6 +148,7 @@ export function setupLights(scene) {
   dir.shadow.camera.top = 240;
   dir.shadow.camera.bottom = -240;
   scene.add(dir);
+  scene.add(dir.target);
 
   // Fill light frio (oposto ao sol) — RIM clássico key-fill pra contraste de
   // cor que destaca a forma 3D. Sem isso, BMW vira mancha uniforme golden.

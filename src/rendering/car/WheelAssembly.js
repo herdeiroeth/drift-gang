@@ -3,6 +3,7 @@ import { VISUAL_CFG } from './CarVisualConfig.js';
 import { buildBrake } from './parts/BrakeAssembly.js';
 import { buildRim } from './parts/Rim.js';
 import { buildTreadBlocks } from './parts/Tire.js';
+import { wrapAngle } from './WheelMotionBlur.js';
 
 // Container visual de uma roda. Adicionado como filho de wheel.mesh — herda
 // pose de suspensão+steer de graça (a física já set rotation com pitch+heading
@@ -54,6 +55,6 @@ export class WheelAssembly {
   // do tire (que arrasta junto rim, brake disc no commit 3). A pose global da
   // roda (suspensão + steer + roll) é setada por CarVisuals via wheel.mesh.
   update(dt) {
-    this.tireMesh.rotation.x += this.wheel.angularVelocity * dt;
+    this.tireMesh.rotation.x = wrapAngle(this.tireMesh.rotation.x + this.wheel.angularVelocity * dt);
   }
 }

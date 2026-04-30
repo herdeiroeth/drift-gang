@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VISUAL_CFG } from '../CarVisualConfig.js';
 import { cylinderBetween } from './cylinderBetween.js';
+import { wrapAngle } from '../WheelMotionBlur.js';
 
 // Estruturas axiais do carro:
 //   - SwayBar (estática): barra horizontal entre as rodas, presa ao chassis.
@@ -81,6 +82,6 @@ export class HalfShaft {
 
     cylinderBetween(this.group, _diffLocal, _hubLocal);
     // Spin em torno do próprio eixo longitudinal (Y local do group orientado).
-    this.spinMesh.rotation.y += this.wheel.angularVelocity * dt;
+    this.spinMesh.rotation.y = wrapAngle(this.spinMesh.rotation.y + this.wheel.angularVelocity * dt);
   }
 }

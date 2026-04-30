@@ -13,6 +13,7 @@ import {
   resolveCarLightRole,
 } from './loaders/lightMaterials.js';
 import { VISUAL_CFG } from './CarVisualConfig.js';
+import { WheelMotionBlur, wrapAngle } from './WheelMotionBlur.js';
 
 const LIGHT_MODE_ORDER = ['drl', 'low', 'high', 'off'];
 const LIGHT_MODE_LABELS = {
@@ -126,6 +127,7 @@ export class CarVisuals {
     this.lightShowActive = false;
     this.lightShowTime = 0;
     this.lightShowStepIndex = -1;
+    this.wheelMotionBlur = null;
 
     if (useGltf) {
       const gltfScene = opts.gltfScene;
@@ -169,6 +171,11 @@ export class CarVisuals {
       buildChassis(car.mesh);
       this.wheelAssemblies = car.wheels.map((w) => new WheelAssembly(w));
     }
+
+    this.wheelMotionBlur = new WheelMotionBlur(car.wheels, {
+      wheelAssemblies: this.wheelAssemblies,
+      gltfWheelHubs: this.gltfWheelHubs,
+    });
 
     const useProceduralUndercarriage = !useGltf || cfg.showProceduralUndercarriage;
     if (!useProceduralUndercarriage) return;
@@ -214,7 +221,6 @@ export class CarVisuals {
       for (const wa of this.wheelAssemblies) wa.update(dt);
     }
     if (this.gltfWheelHubs) {
-      const TAU = Math.PI * 2;
       for (let i = 0; i < this.gltfWheelHubs.length; i++) {
         const hub = this.gltfWheelHubs[i];
         const spinHub = hub.userData.spinHub;
@@ -224,15 +230,14 @@ export class CarVisuals {
         // em alta velocidade sustentada (rear ω ~200 rad/s), rotation acumula
         // milhares de radianos em segundos — precision drift do Euler→Matrix
         // do three.js produz jitter visível.
-        let r = spinHub.rotation.x + av * dt;
-        if (r > TAU || r < -TAU) r = r % TAU;
-        spinHub.rotation.x = r;
+        spinHub.rotation.x = wrapAngle(spinHub.rotation.x + av * dt);
       }
     }
 
     for (const hs of this.halfShafts) hs.update(dt);
     for (const lk of this.linkages) lk.update();
 
+    this.wheelMotionBlur?.update();
     this._updateGlbRigging();
   }
 

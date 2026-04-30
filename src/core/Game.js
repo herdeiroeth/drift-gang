@@ -23,6 +23,11 @@ import { CameraStudioUI } from '../ui/CameraStudioUI.js';
 import { loadCarModel } from '../rendering/car/loaders/CarModelLoader.js';
 import { VISUAL_CFG } from '../rendering/car/CarVisualConfig.js';
 import { setRendererCapabilities } from '../rendering/materials/PBRTextureLoader.js';
+import { RenderPipeline } from '../rendering/RenderPipeline.js';
+import {
+  resolveRenderPixelRatio,
+  resolveRenderQuality,
+} from '../rendering/RenderQualityConfig.js';
 
 // Toggle de modo: pista vs arena livre. Default: pista (Pista 1).
 // Arena livre é mantido para testes de tuning sem voltas (legado).
@@ -55,14 +60,15 @@ export class Game {
   constructor(opts = {}) {
     this.opts = opts;
     this.canvas = document.getElementById('game-canvas');
+    this.renderQuality = resolveRenderQuality();
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+    this.renderer.setPixelRatio(resolveRenderPixelRatio(this.renderQuality));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = this.renderQuality.shadowMapType ?? THREE.PCFShadowMap;
 
     // Propaga capabilities (max anisotropy) pro PBRTextureLoader.
     setRendererCapabilities(this.renderer);
@@ -76,6 +82,7 @@ export class Game {
 
     this.env = setupEnv(this.scene, this.renderer);
     this.lights = setupLights(this.scene);
+    this._configureQualityShadows();
 
     if (USE_TRACK) {
       // Tenta carregar trackData editado do localStorage; fallback no default.
@@ -84,8 +91,10 @@ export class Game {
       this.track = buildTrack(this.scene, trackToUse);
       this.groundObjects = this.track.groundObjects;
       this.arena = null;
-      // Ajustar shadow camera ao bbox da pista pra sombras crisp em pista grande.
-      this._fitShadowCameraToTrack(this.track.bbox);
+      if (!this.renderQuality.dynamicShadowFocus) {
+        // Ajustar shadow camera ao bbox da pista pra sombras crisp em pista grande.
+        this._fitShadowCameraToTrack(this.track.bbox);
+      }
       // Cenário 3D: árvores, plantação, postes, torres ao redor da pista.
       this.scenery = buildScenery(this.scene, { bbox: this.track.bbox });
     } else {
@@ -98,6 +107,7 @@ export class Game {
     }
     this.car = new Car(this.scene, this.groundObjects, { gltfScene: this.opts.gltfScene });
     this.camCtrl = new CamCtrl(this.camera);
+    this._updateShadowCameraAroundCar(true);
 
     this.hud = new HUDManager();
     this.hud.bind();
@@ -126,6 +136,15 @@ export class Game {
     this.trackEditor = new TrackEditor(this);
     this.trackEditor.bind();
 
+    this.renderPipeline = new RenderPipeline({
+      renderer: this.renderer,
+      scene: this.scene,
+      camera: this.camera,
+      quality: this.renderQuality,
+    });
+    this.renderPipeline.resize(window.innerWidth, window.innerHeight);
+    window.__renderPipeline = this.renderPipeline;
+
     this.state = 'start';
 
     this.bindResize();
@@ -138,9 +157,64 @@ export class Game {
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
+      this.renderer.setPixelRatio(resolveRenderPixelRatio(this.renderQuality));
       this.renderer.setSize(window.innerWidth, window.innerHeight);
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      this.renderPipeline?.resize(window.innerWidth, window.innerHeight);
     });
+  }
+
+  _renderFrame(dt = 0) {
+    this._updateShadowCameraAroundCar();
+    if (this.renderPipeline) {
+      this.renderPipeline.render(dt);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  _configureQualityShadows() {
+    const dir = this.lights?.dir;
+    if (!dir) return;
+    const q = this.renderQuality;
+    const size = q.shadowMapSize ?? 2048;
+    dir.shadow.mapSize.set(size, size);
+    dir.shadow.bias = -0.00005;
+    dir.shadow.normalBias = 0.035;
+
+    if (q.dynamicShadowFocus) {
+      const radius = q.shadowFocusRadius ?? 58;
+      const cam = dir.shadow.camera;
+      cam.left = -radius;
+      cam.right = radius;
+      cam.top = radius;
+      cam.bottom = -radius;
+      cam.near = 0.5;
+      cam.far = Math.max(360, (q.shadowLightDistance ?? 220) + radius * 2.5);
+      cam.updateProjectionMatrix();
+    }
+  }
+
+  _updateShadowCameraAroundCar(force = false) {
+    const q = this.renderQuality;
+    const dir = this.lights?.dir;
+    if (!q.dynamicShadowFocus || !dir || !this.car) return;
+
+    const radius = q.shadowFocusRadius ?? 58;
+    const mapSize = q.shadowMapSize ?? 4096;
+    const texel = (radius * 2) / mapSize;
+    const focus = new THREE.Vector3(
+      Math.round(this.car.position.x / texel) * texel,
+      Math.round((this.car.position.y + 0.75) / texel) * texel,
+      Math.round(this.car.position.z / texel) * texel,
+    );
+
+    if (!force && dir.target.position.distanceToSquared(focus) < texel * texel * 0.25) return;
+
+    const sun = this.env?.sun ?? new THREE.Vector3(0.4, 0.8, 0.4).normalize();
+    dir.target.position.copy(focus);
+    dir.position.copy(focus).addScaledVector(sun, q.shadowLightDistance ?? 220);
+    dir.target.updateMatrixWorld();
+    dir.updateMatrixWorld();
   }
 
   // Ajusta o frustum ortográfico do shadow camera ao bbox da pista + margem.
@@ -181,7 +255,9 @@ export class Game {
     this.track = buildTrack(this.scene, newTrackData);
     this.groundObjects = this.track.groundObjects;
     this.car.groundObjects = this.groundObjects;
-    this._fitShadowCameraToTrack(this.track.bbox);
+    if (!this.renderQuality.dynamicShadowFocus) {
+      this._fitShadowCameraToTrack(this.track.bbox);
+    }
     // Reconstrói scenery com bbox atualizada
     if (this.scenery) {
       this.scene.remove(this.scenery);
@@ -237,7 +313,7 @@ export class Game {
 
       if (this.state === 'start') {
         this.camCtrl.update(dt, { car: this.car, telem: { speed: 0 } });
-        this.renderer.render(this.scene, this.camera);
+        this._renderFrame(dt);
         if (this.input.once('Space')) this.start();
         if (this.input.once('KeyM')) this._openEditor();
         this.input.clear();
@@ -251,7 +327,7 @@ export class Game {
           this.state = this._stateBeforeEditor || 'playing';
           this._stateBeforeEditor = null;
         }
-        this.renderer.render(this.scene, this.camera);
+        this._renderFrame(dt);
         this.input.clear();
         return;
       }
@@ -324,7 +400,7 @@ export class Game {
 
       this.camCtrl.update(dt, { car: this.car, telem });
       this.hud.update(telem, dt, this.state === 'playing');
-      this.renderer.render(this.scene, this.camera);
+      this._renderFrame(dt);
       this.input.clear();
     } catch (e) {
       console.error('GAME LOOP CRASH:', e.message, e.stack);
