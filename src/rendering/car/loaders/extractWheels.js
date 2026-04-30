@@ -204,31 +204,38 @@ function collectWheelComponents(root, carCenter, carSize) {
   return out;
 }
 
-// Cria um hub group em wheel.mesh e reparenta TODOS os componentes do cluster
-// preservando scale herdada do gltfRoot. Componentes ficam centrados no hub.
+// Regex de sub-meshes que ficam ESTÁTICOS (não giram com a roda). Caliper e
+// brake pads são presos ao knuckle no mundo real — só o disco + cubo + aro
+// + pneu giram. No BMW M4 GLB, o cluster `amdb11_brakedisc_FR.XXX` agrupa
+// disco + caliper + pads como sub-meshes irmãos (mesmo node parent), então
+// um único `child.rotation.x += av*dt` no parent gira tudo junto. Identifica-
+// mos os sub-meshes pelo nome e separamos antes do spin.
+const STATIC_SUBMESH_NAME = /(caliper|brakepad|brake_pad|brake_caliper)/i;
+
+// Cria um hub group em wheel.mesh e reparenta os componentes do cluster
+// separando-os entre `spinHub` (gira com a roda) e `staticHub` (fixo no
+// knuckle). O hub central recebe a correção de spin axis e o spin runtime
+// é aplicado SOMENTE no spinHub — caliper/pad permanecem visíveis e parados.
 function buildWheelHub(candList, physWheel) {
   // 1) Bbox combinado de todos os componentes do cluster
   const { center, size, ok } = combinedBounds(candList);
   if (!ok) return null;
 
-  // 2) Hub vai pra wheel.mesh
+  // 2) Hub vai pra wheel.mesh; sub-grupos isolam parte rotativa da estática
   const hub = new THREE.Group();
+  hub.name = 'wheelHub';
+  const spinHub = new THREE.Group();
+  spinHub.name = 'wheelSpinning';
+  const staticHub = new THREE.Group();
+  staticHub.name = 'wheelStatic';
+  hub.add(spinHub);
+  hub.add(staticHub);
 
-  // 3) Reparent cada componente preservando matrix world
-  // Importante: a ordem importa porque alguns componentes são filhos de outros
-  // que estão sendo movidos. Vamos copiar a referência da lista pra evitar
-  // mutação durante o loop.
+  // 3) Reparent cada componente preservando matrix world. Para clusters
+  // mistos (disco+caliper no mesmo parent), descemos um nível e separamos
+  // sub-meshes pelo nome — assim o caliper sai do parent que vai pro spin.
   for (const cand of candList) {
-    const node = cand.node;
-    node.updateMatrixWorld(true);
-    const wm = node.matrixWorld.clone();
-    node.parent?.remove(node);
-    // Bake matrix world como local (preserva scale ~0.012 herdada do gltfRoot)
-    node.matrix.copy(wm);
-    node.matrix.decompose(node.position, node.quaternion, node.scale);
-    // Centralizar cluster no hub: subtrair center comum a todos os nodes
-    node.position.sub(center);
-    hub.add(node);
+    splitClusterIntoSpinAndStatic(cand.node, spinHub, staticHub, center);
   }
 
   // 4) Detectar eixo de spin pelo bbox combinado (largura do pneu < raio)
@@ -242,7 +249,43 @@ function buildWheelHub(candList, physWheel) {
 
   hub.userData.isGltfWheelHub = true;
   hub.userData.physWheel = physWheel;
+  hub.userData.spinHub = spinHub;
+  hub.userData.staticHub = staticHub;
   return hub;
+}
+
+// Decide se reparenta o cluster inteiro pro spinHub OU desce um nível e
+// reparenta cada sub-mesh individualmente (caliper/pad → staticHub, resto →
+// spinHub). Decisão: cluster inteiro vai pro spin se NENHUM child tem nome
+// estático. Caso contrário, o parent é desmontado.
+function splitClusterIntoSpinAndStatic(node, spinHub, staticHub, center) {
+  const children = [...node.children];
+  const hasStaticChild = children.some(
+    (c) => STATIC_SUBMESH_NAME.test(c.name || ''),
+  );
+
+  if (!hasStaticChild) {
+    bakeAndAppend(node, spinHub, center);
+    return;
+  }
+
+  for (const child of children) {
+    const dest = STATIC_SUBMESH_NAME.test(child.name || '') ? staticHub : spinHub;
+    bakeAndAppend(child, dest, center);
+  }
+  node.parent?.remove(node);
+}
+
+function bakeAndAppend(node, target, center) {
+  node.updateMatrixWorld(true);
+  const wm = node.matrixWorld.clone();
+  node.parent?.remove(node);
+  // Bake matrix world como local (preserva scale ~0.012 herdada do gltfRoot)
+  node.matrix.copy(wm);
+  node.matrix.decompose(node.position, node.quaternion, node.scale);
+  // Centralizar cluster no eixo de spin: subtrai o center comum a todos
+  node.position.sub(center);
+  target.add(node);
 }
 
 // Eixo "fino" do bbox = eixo de spin (largura do pneu < raio externo).

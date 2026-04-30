@@ -118,9 +118,8 @@ export class CarVisuals {
     }
 
     // Spin: WheelAssembly faz `tireMesh.rotation.x += av*dt` no modo procedural.
-    // No modo GLB hub, fazemos a mesma rotação no nó da roda original (children[0]
-    // do hub) — o hub pode ter rotação Z/Y de correção de eixo, então spina
-    // dentro do hub.
+    // No modo GLB hub, spinamos APENAS o sub-grupo `spinHub` — o `staticHub`
+    // contém calipers/pads que devem ficar presos ao knuckle (não giram).
     if (this.wheelAssemblies) {
       for (const wa of this.wheelAssemblies) wa.update(dt);
     }
@@ -128,17 +127,16 @@ export class CarVisuals {
       const TAU = Math.PI * 2;
       for (let i = 0; i < this.gltfWheelHubs.length; i++) {
         const hub = this.gltfWheelHubs[i];
+        const spinHub = hub.userData.spinHub;
+        if (!spinHub) continue;
         const av = car.wheels[i].angularVelocity;
-        // Spina cada child em X local, COM WRAP modulo 2π. Sem wrap, em
-        // alta velocidade sustentada (rear ω ~200 rad/s), rotation acumula
+        // Spina o sub-grupo spinHub em X local, COM WRAP modulo 2π. Sem wrap,
+        // em alta velocidade sustentada (rear ω ~200 rad/s), rotation acumula
         // milhares de radianos em segundos — precision drift do Euler→Matrix
-        // do three.js produz jitter visível: rodas "saem" da carroceria
-        // ou entram. Wrap mantém rotation em [-2π, 2π].
-        for (const child of hub.children) {
-          let r = child.rotation.x + av * dt;
-          if (r > TAU || r < -TAU) r = r % TAU;
-          child.rotation.x = r;
-        }
+        // do three.js produz jitter visível.
+        let r = spinHub.rotation.x + av * dt;
+        if (r > TAU || r < -TAU) r = r % TAU;
+        spinHub.rotation.x = r;
       }
     }
 
@@ -256,13 +254,23 @@ export class CarVisuals {
     // reported orbiting/flying parts on acceleration.
     this._restoreFrozenGlbMechanicals();
 
-    // Steering wheel: preserva tilt original (rotation.x=-1.13). Aplica
-    // rotação ao redor de Z LOCAL (eixo do volante).
+    // Steering wheel: preserva tilt original (rotation.x ≈ -1.13 do GLB BMW
+    // M4 — coluna inclinada para o motorista). O modelo neutro é um disco
+    // horizontal (normal +Y), então o EIXO DA COLUNA, após o tilt em X, é
+    // o Y LOCAL do volante. Em Euler XYZ, set rotation.y mantendo X = base
+    // produz a matriz R_x · R_y, equivalente a rotacionar ao redor do Y já
+    // tilted no mundo (= eixo da coluna). Usar rotation.z aqui (como antes)
+    // pitchava o volante pra frente em vez de girar como direção.
+    //
+    // Sinal: nessa convenção, `car.steer > 0` faz as rodas dianteiras virar
+    // para +X (direita do carro). Para o volante seguir junto (topo do
+    // volante indo para o mesmo lado da frente das rodas), aplicamos
+    // `+car.steer * lockToLockRad` — sem o sinal de menos.
     if (G.steerWheel && G._baseRotSteerWheel) {
       const lockToLockRad = 2.5 * Math.PI;
       G.steerWheel.rotation.x = G._baseRotSteerWheel.x;
-      G.steerWheel.rotation.y = G._baseRotSteerWheel.y;
-      G.steerWheel.rotation.z = G._baseRotSteerWheel.z + (-car.steer * lockToLockRad);
+      G.steerWheel.rotation.z = G._baseRotSteerWheel.z;
+      G.steerWheel.rotation.y = G._baseRotSteerWheel.y + (car.steer * lockToLockRad);
     }
 
     // Tachometer needle: 0..maxRPM → 0..-252°. Preserva rot.x/y/z base.
