@@ -18,6 +18,7 @@ import { TRACK_CFG } from './constants.js';
 import { TuningUI } from '../tuning/TuningUI.js';
 import { TrackEditor } from '../editor/TrackEditor.js';
 import { Telemetry } from '../ui/Telemetry.js';
+import { CameraStudioUI } from '../ui/CameraStudioUI.js';
 import { loadCarModel } from '../rendering/car/loaders/CarModelLoader.js';
 import { VISUAL_CFG } from '../rendering/car/CarVisualConfig.js';
 
@@ -90,6 +91,9 @@ export class Game {
 
     this.tuning = new TuningUI(this.car);
     this.tuning.bind();
+
+    this.cameraStudio = new CameraStudioUI(this.camCtrl);
+    this.cameraStudio.bind();
 
     this.telemetry = new Telemetry();
 
@@ -206,7 +210,7 @@ export class Game {
       this.lastTime = time;
 
       if (this.state === 'start') {
-        this.camCtrl.update(dt, this.car.position, this.car.heading, 0);
+        this.camCtrl.update(dt, { car: this.car, telem: { speed: 0 } });
         this.renderer.render(this.scene, this.camera);
         if (this.input.once('Space')) this.start();
         if (this.input.once('KeyM')) this._openEditor();
@@ -226,16 +230,21 @@ export class Game {
         return;
       }
 
-      if (this.input.once('KeyC')) this.camCtrl.next();
+      if (this.input.once('KeyC')) {
+        this.camCtrl.next();
+        this.cameraStudio.syncFromCamera();
+      }
       if (this.input.once('KeyR')) {
         this.car.reset(this.track?.spawn);
         this.hud.resetScore();
         if (this.lapSystem) this.lapSystem.reset();
       }
       if (this.input.once('KeyK')) this.tuning.toggle();
+      if (this.input.once('KeyV')) this.cameraStudio.toggle();
       if (this.input.once('KeyH')) this.telemetry.toggle();
       if (this.input.once('KeyM')) this._openEditor();
       this.tuning.update();
+      this.cameraStudio.update();
 
       const telem = this.car.update(dt, this.input, this.smoke, this.skids);
       this.telemetry.update(this.car);
@@ -287,7 +296,7 @@ export class Game {
         }
       }
 
-      this.camCtrl.update(dt, this.car.position, this.car.heading, telem.speed);
+      this.camCtrl.update(dt, { car: this.car, telem });
       this.hud.update(telem, dt, this.state === 'playing');
       this.renderer.render(this.scene, this.camera);
       this.input.clear();
