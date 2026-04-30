@@ -121,6 +121,7 @@ export class Car {
     });
 
     const hw = c.halfWidth;
+    const frontHw = hw + (this.opts.gltfScene ? (VISUAL_CFG.gltfBody.frontWheelOutboardOffset ?? 0) : 0);
     const rearHw = hw + (this.opts.gltfScene ? (VISUAL_CFG.gltfBody.rearWheelOutboardOffset ?? 0) : 0);
     const fAxle = c.cgToFrontAxle;
     const rAxle = -c.cgToRearAxle;
@@ -128,8 +129,8 @@ export class Car {
     this.suspAttachY = attachY;
 
     this.wheels = [
-      new Wheel(scene, new THREE.Vector3(-hw, attachY, fAxle), true, c),
-      new Wheel(scene, new THREE.Vector3( hw, attachY, fAxle), true, c),
+      new Wheel(scene, new THREE.Vector3(-frontHw, attachY, fAxle), true, c),
+      new Wheel(scene, new THREE.Vector3( frontHw, attachY, fAxle), true, c),
       new Wheel(scene, new THREE.Vector3(-rearHw, attachY, rAxle), false, c),
       new Wheel(scene, new THREE.Vector3( rearHw, attachY, rAxle), false, c),
     ];

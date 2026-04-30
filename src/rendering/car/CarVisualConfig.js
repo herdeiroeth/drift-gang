@@ -31,6 +31,9 @@ export const VISUAL_CFG = {
     // Offset lateral extra por lado nas rodas traseiras do GLB. O modelo fica
     // visualmente melhor com a traseira um pouco mais para fora dos paralamas.
     rearWheelOutboardOffset: 0.08,
+    // Mesmo princípio nas dianteiras, mas com magnitude menor — visualmente as
+    // dianteiras pedem track um pouco mais estreita que as traseiras.
+    frontWheelOutboardOffset: 0.05,
     // Debug/legado: desenhar suspensão/drivetrain procedural por cima do GLB.
     // Default false para usar a mecânica visível que já vem no asset.
     showProceduralUndercarriage: false,
