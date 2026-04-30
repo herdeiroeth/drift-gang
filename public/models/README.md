@@ -25,11 +25,14 @@ python3 ~/.agents/skills/sketchfab/scripts/sketchfab.py model:download \
   <UID> --format glb --out ./public/models/
 ```
 
-## Pipeline de otimização (recomendado)
+## Fallback otimizado (leve)
 
-O jogo tenta carregar primeiro `bmw_m4_f82.opt.glb` e cai para `bmw_m4_f82.glb`
-se o otimizado não existir. Para gerar o arquivo otimizado mantendo a hierarquia
-e os nomes usados pelo rig/luzes do jogo:
+O jogo tenta carregar primeiro `bmw_m4_f82.glb` para preservar a qualidade da
+pintura, malha e texturas em close-up. O `bmw_m4_f82.opt.glb` fica apenas como
+fallback leve caso o arquivo fonte não exista.
+
+Para gerar o fallback mantendo a hierarquia e os nomes usados pelo rig/luzes do
+jogo:
 
 ```bash
 npx --yes @gltf-transform/cli optimize \

@@ -266,9 +266,11 @@ export class TuningUI {
       });
 
     body.appendChild(this._mkSection('Gear Ratios'));
-    for (let g = 1; g <= 6; g++) {
-      const idx = g + 1; // index em gearRatios array (0=N, 1=R, 2..7=1ª..6ª)
-      this._mkSlider(body, `gear${g}`, `${g}ª Gear`, 0.4, 4.5, 0.05, 2,
+    // 7 marchas (DCT M4). Index em gearRatios array (0=N, 1=R, 2..8=1ª..7ª).
+    // Range 0.4-5.0 cobre 1ª curtas tipo M4 DCT (4.806) e overdrives muito longos.
+    for (let g = 1; g <= 7; g++) {
+      const idx = g + 1;
+      this._mkSlider(body, `gear${g}`, `${g}ª Gear`, 0.4, 5.0, 0.05, 2,
         v => {
           if (this.car.powertrain?.gearbox?.gearRatios) {
             this.car.powertrain.gearbox.gearRatios[idx] = v;
@@ -314,6 +316,27 @@ export class TuningUI {
     this._mkSlider(body, 'turboMaxBoost', 'Turbo Max Boost (bar)', 0, 2.5, 0.05, 2,
       v => {
         if (this.car.powertrain?.turbo) this.car.powertrain.turbo.maxBoost = v;
+      });
+    // ECU Tune (M4 vehicle data deixa esses defaults: 1.20 / 80ms / 0.926).
+    this._mkSlider(body, 'wastegateBoost', 'Wastegate Boost (bar)', 0.5, 1.8, 0.02, 2,
+      v => {
+        if (this.car.powertrain?.turbo) this.car.powertrain.turbo.wastegateBoost = v;
+      });
+    this._mkSlider(body, 'throttleLagMs', 'Throttle Lag (ms)', 0, 200, 5, 0,
+      v => {
+        if (this.car.powertrain?.engine) this.car.powertrain.engine._throttleTau = v / 1000;
+      });
+    this._mkSlider(body, 'transEff', 'Trans Efficiency', 0.80, 0.98, 0.005, 3,
+      v => {
+        if (this.car.powertrain) this.car.powertrain.transEfficiency = v;
+        if (this.car.cfg) this.car.cfg.transEfficiency = v;
+      });
+    // ECU Map: stock = 1.20 bar, stage1 sobe wastegate pra 1.50 bar.
+    this._mkSelect(body, 'ecuMap', 'ECU Map', ['stock', 'stage1'],
+      v => {
+        if (!this.car.powertrain?.turbo) return;
+        this.car.powertrain.turbo.wastegateBoost = (v === 'stage1') ? 1.50 : 1.20;
+        this.controls.wastegateBoost?.set(this.car.powertrain.turbo.wastegateBoost);
       });
 
     // ----- Tire / SAT (Sprint 1: load sensitivity + kingpin) -----
@@ -366,13 +389,14 @@ export class TuningUI {
 
     // ----- ECU programável (tipo FuelTech) -----
     body.appendChild(this._mkSection('ECU ▸ Shift Map (per gear)'));
-    // 1ª (idx=2) sobe pra 2ª etc. Última transição é 5ª↔6ª (idx=6).
+    // 1ª (idx=2) sobe pra 2ª etc. Última transição é 6ª↔7ª (idx=7) no DCT 7v.
     const shiftPairs = [
       { idx: 2, label: '1ª → 2ª' },
       { idx: 3, label: '2ª → 3ª' },
       { idx: 4, label: '3ª → 4ª' },
       { idx: 5, label: '4ª → 5ª' },
       { idx: 6, label: '5ª → 6ª' },
+      { idx: 7, label: '6ª → 7ª' },
     ];
     for (const { idx, label } of shiftPairs) {
       // Header linha do par
@@ -563,7 +587,7 @@ export class TuningUI {
     this.controls.finalDrive?.set(finalDrive);
 
     const gr = pt?.gearbox?.gearRatios ?? cfg.gearRatios ?? [];
-    for (let g = 1; g <= 6; g++) {
+    for (let g = 1; g <= 7; g++) {
       const idx = g + 1;
       const v = gr[idx];
       if (typeof v === 'number') this.controls[`gear${g}`]?.set(v);
@@ -583,7 +607,17 @@ export class TuningUI {
     if (pt?.tc) this.controls.tcMode?.set(pt.tc.mode ?? 'off');
     this.controls.brakeBiasFront?.set((cfg.brakeBiasFront ?? 0.62) * 100);
     if (pt?.engine) this.controls.engineInertia?.set(pt.engine.inertia ?? 0.18);
-    if (pt?.turbo) this.controls.turboMaxBoost?.set(pt.turbo.maxBoost ?? 0);
+    if (pt?.turbo) {
+      this.controls.turboMaxBoost?.set(pt.turbo.maxBoost ?? 0);
+      this.controls.wastegateBoost?.set(pt.turbo.wastegateBoost ?? pt.turbo.maxBoost ?? 1.20);
+    }
+    if (pt?.engine) {
+      this.controls.throttleLagMs?.set((pt.engine._throttleTau ?? 0) * 1000);
+    }
+    this.controls.transEff?.set(pt?.transEfficiency ?? cfg.transEfficiency ?? 0.926);
+    // ECU map é heurístico — interpreta wastegate atual.
+    const wg = pt?.turbo?.wastegateBoost ?? 1.20;
+    this.controls.ecuMap?.set(wg >= 1.40 ? 'stage1' : 'stock');
 
     // Tire / SAT (Sprint 1)
     this.controls.loadSensN?.set(cfg.loadSensN ?? 0.85);
@@ -609,7 +643,7 @@ export class TuningUI {
     // ECU sliders
     const ecu = pt?.ecu;
     if (ecu) {
-      for (const idx of [2, 3, 4, 5, 6]) {
+      for (const idx of [2, 3, 4, 5, 6, 7]) {
         const m = ecu.shiftMap?.[idx];
         if (!m) continue;
         this.controls[`up_wot_${idx}`]?.set(m.upWOT);

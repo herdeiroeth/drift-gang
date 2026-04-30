@@ -121,6 +121,7 @@ export class Car {
     });
 
     const hw = c.halfWidth;
+    const frontHw = hw + (this.opts.gltfScene ? (VISUAL_CFG.gltfBody.frontWheelOutboardOffset ?? 0) : 0);
     const rearHw = hw + (this.opts.gltfScene ? (VISUAL_CFG.gltfBody.rearWheelOutboardOffset ?? 0) : 0);
     const fAxle = c.cgToFrontAxle;
     const rAxle = -c.cgToRearAxle;
@@ -128,8 +129,8 @@ export class Car {
     this.suspAttachY = attachY;
 
     this.wheels = [
-      new Wheel(scene, new THREE.Vector3(-hw, attachY, fAxle), true, c),
-      new Wheel(scene, new THREE.Vector3( hw, attachY, fAxle), true, c),
+      new Wheel(scene, new THREE.Vector3(-frontHw, attachY, fAxle), true, c),
+      new Wheel(scene, new THREE.Vector3( frontHw, attachY, fAxle), true, c),
       new Wheel(scene, new THREE.Vector3(-rearHw, attachY, rAxle), false, c),
       new Wheel(scene, new THREE.Vector3( rearHw, attachY, rAxle), false, c),
     ];
@@ -621,6 +622,129 @@ export class Car {
     this._syncWheelVisualPoses();
 
     return { wheelData, rpm: this.rpm, gear: this.gear, powertrain: ptResult };
+  }
+
+  /**
+   * Aplica um vehicle data template (JSON em src/vehicles/*.json) — overwrite
+   * dos defaults físicos (chassis, motor, turbo, drivetrain) com os valores
+   * ground-truth de um veículo específico (ex.: BMW M4 F82 S55).
+   *
+   * Diferenças vs applyPreset:
+   *   - vehicle data = template imutável do CARRO (massa, curva torque,
+   *     boost map, ratios DCT). Aplicado UMA vez na inicialização.
+   *   - preset       = tune deltas em cima do veículo (ECU map, lock %, etc).
+   *     Aplicado por cima, múltiplas vezes via TuningUI.
+   *
+   * Ordem recomendada em Game.js: applyVehicleData → applyPreset → tunings.
+   *
+   * Shape: ver src/vehicles/bmw-m4-f82.json. Todos os campos opcionais.
+   */
+  applyVehicleData(v) {
+    if (!v) return;
+    const c = this.cfg;
+    const pt = this.powertrain;
+
+    // 1) Chassis — massa, geometria, raio do pneu, drag.
+    if (v.chassis) {
+      const ch = v.chassis;
+      for (const k of ['mass', 'cgToFrontAxle', 'cgToRearAxle', 'cgHeight',
+                       'halfWidth', 'wheelRadius', 'wheelMass', 'wheelWidth',
+                       'Cdrag', 'Crr']) {
+        if (typeof ch[k] === 'number') c[k] = ch[k];
+      }
+      // Recalcula wheelBase, axleWeightRatio, sprungMass, inércias derivadas,
+      // mech trail e loadSensRefFz (todos dependem dos defaults acima).
+      c.syncDerivedGeometry();
+    }
+
+    // 2) Engine — curva torque, RPMs, fricção, throttle lag.
+    if (v.engine && pt?.engine) {
+      const e = pt.engine;
+      const ev = v.engine;
+      if (Array.isArray(ev.torqueCurve)) {
+        e.torqueCurve = ev.torqueCurve.map(p => ({ r: p.r, t: p.t }));
+        e._maxTorque = Math.max(...e.torqueCurve.map(p => p.t));
+      }
+      for (const k of ['idleRPM', 'redlineRPM', 'revLimitRPM', 'maxRPM',
+                       'stallRPM', 'inertia', 'frictionPassive',
+                       'frictionLinear', 'frictionQuadratic', 'coastTorque']) {
+        if (typeof ev[k] === 'number') e[k] = ev[k];
+      }
+      if (typeof ev.throttleLagMs === 'number') {
+        e._throttleTau = ev.throttleLagMs / 1000;
+      }
+      // Re-sincroniza limites no Gearbox (gating de over-rev / bog).
+      pt._syncEngineLimitsToGearbox?.();
+    }
+
+    // 3) Turbo — boost map 2D, wastegate, spool tau.
+    if (v.turbo && pt?.turbo) {
+      const t = pt.turbo;
+      const tv = v.turbo;
+      if (typeof tv.maxBoost === 'number')        t.maxBoost = tv.maxBoost;
+      if (typeof tv.wastegateBoost === 'number')  t.wastegateBoost = tv.wastegateBoost;
+      if (typeof tv.spoolTimeConstant === 'number') t.spoolTau = tv.spoolTimeConstant;
+      if (typeof tv.blowOffEnabled === 'boolean') t.blowOffEnabled = tv.blowOffEnabled;
+      if (typeof tv.blowOffMinBoost === 'number') t.blowOffMinBoost = tv.blowOffMinBoost;
+      if (Array.isArray(tv.boostMapRPM))          t.boostMapRPM = [...tv.boostMapRPM];
+      if (Array.isArray(tv.boostMapThrottle))     t.boostMapThrottle = [...tv.boostMapThrottle];
+      if (Array.isArray(tv.boostMap))             t.boostMap = tv.boostMap.map(row => [...row]);
+    }
+
+    // 4.4) Tire — mu, load sensitivity, relaxation, drift bias.
+    // Pneus M4 stock são performance (Michelin Pilot Super Sport / Cup 2):
+    // mu ≈ 1.35 em asfalto seco. Default genérico era 1.20 (street tire).
+    if (v.tire) {
+      const tv = v.tire;
+      if (typeof tv.mu === 'number')                c.mu = tv.mu;
+      if (typeof tv.loadSensN === 'number')         c.loadSensN = tv.loadSensN;
+      if (typeof tv.loadSensRefFz === 'number')     c.loadSensRefFz = tv.loadSensRefFz;
+      if (typeof tv.relaxationLength === 'number')  c.relaxationLength = tv.relaxationLength;
+      if (typeof tv.tireDriftBias === 'number')     c.tireDriftBias = tv.tireDriftBias;
+    }
+
+    // 4.5) Assists — TC mode, brake bias. Aplicado ANTES do drivetrain pq
+    // alguns assists (ex: TC) interagem com o powertrain em runtime.
+    if (v.assists) {
+      const a = v.assists;
+      if (typeof a.tcMode === 'string' && pt) {
+        if (typeof pt.setTCMode === 'function') pt.setTCMode(a.tcMode);
+        else if (pt.tc) pt.tc.mode = a.tcMode;
+      }
+      if (typeof a.brakeBiasFront === 'number') c.brakeBiasFront = a.brakeBiasFront;
+    }
+
+    // 4) Drivetrain — gear ratios, final drive, eficiência, modo, diff.
+    if (v.drivetrain && pt) {
+      const d = v.drivetrain;
+      if (Array.isArray(d.gearRatios)) {
+        if (pt.gearbox) pt.gearbox.gearRatios = [...d.gearRatios];
+        c.gearRatios = [...d.gearRatios];
+      }
+      if (typeof d.finalDrive === 'number') {
+        pt.finalDrive = d.finalDrive;
+        if (pt.differential) pt.differential.finalDrive = d.finalDrive;
+        c.diffRatio = d.finalDrive;
+      }
+      if (typeof d.transEfficiency === 'number') {
+        pt.transEfficiency = d.transEfficiency;
+        c.transEfficiency = d.transEfficiency;
+      }
+      if (typeof d.gearboxMode === 'string' && pt.gearbox?.setMode) {
+        pt.gearbox.setMode(d.gearboxMode);
+      }
+      if (typeof d.shiftTimeMs === 'number' && pt.gearbox) {
+        pt.gearbox.shiftTime = d.shiftTimeMs / 1000;
+      }
+      if (d.differential && pt.differential) {
+        const dv = d.differential;
+        if (typeof dv.type === 'string')       pt.differential.type = dv.type;
+        if (typeof dv.preload === 'number')    pt.differential.preload = dv.preload;
+        if (typeof dv.powerLock === 'number')  pt.differential.powerLock = dv.powerLock;
+        if (typeof dv.coastLock === 'number')  pt.differential.coastLock = dv.coastLock;
+        if (typeof dv.efficiency === 'number') pt.differential.efficiency = dv.efficiency;
+      }
+    }
   }
 
   /**

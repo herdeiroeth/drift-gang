@@ -61,6 +61,29 @@ export const PHYSICS_CFG = {
   // drivetrainRPM (RPM virtual da roda) em vez de engineRPM como sinal.
   // Isso evita pular pra 6ª em arrancada.
   autoShiftUseDrivetrainRPMWhenSlip: true,
+
+  // ----- Engine (vehicle-data driven) -----
+  // Defaults usados quando vehicle data não especifica. Engine real BMW S55
+  // tem ETC com ~80ms de delay sensor-to-throttle-plate.
+  engine: {
+    defaultThrottleLagMs: 80,
+    // Expoente do throttle parcial no boost map lookup. >1 = throttle parcial
+    // entrega proporcionalmente menos boost (real ETC mapping não é linear).
+    partialThrottleExponent: 1.6,
+  },
+
+  // ----- Turbo (vehicle-data driven) -----
+  // S55 biturbo: spool tau ≈ 180ms (95% boost em ~540ms WOT).
+  turbo: {
+    defaultSpoolTau: 0.18,        // s — constante de tempo do filtro 1ª ordem
+    blowOffMinBoost: 0.35,        // bar — histerese do BOV (não dispara em transientes)
+    blowOffDumpFactor: 0.30,      // boost remanescente após BOV (30% do que tinha)
+  },
+
+  // ----- Drivetrain -----
+  drivetrain: {
+    defaultDctShiftMs: 60,        // DCT 7v Getrag tempo de troca real
+  },
 };
 
 // Multiplicador de mu por superfície. Aplicado em Wheel.updateTireForces
@@ -72,6 +95,35 @@ export const SURFACE_MU = {
   asphalt: 1.0,
   curb:    0.92,
   grass:   0.38,
+};
+
+// Render quality knobs. Defaults agressivos — assumem hardware moderno
+// (GPU dedicada). Para downgrade, basta editar aqui — Game.js e Environment.js
+// leem daqui em vez de magic numbers.
+export const RENDER_CFG = {
+  // Cap de devicePixelRatio. 2.0 dobra fillrate em retinas (1.5×→4×) mas
+  // continua razoável; passar de 2 começa a custar caro em 4K/5K sem ganho
+  // visível pelo screen DPI dos monitores de jogo típicos.
+  pixelRatioMax: 2.0,
+  // Sombra direcional (sol). 4096² = 16MP de shadow buffer; com PCF +
+  // ortho ajustado ao bbox da pista, sombra fica sub-decimétrica em pista
+  // de 600m.
+  shadowMapSize: 4096,
+  // PCFSoftShadowMap foi deprecado no Three atual; PCF com shadow map grande
+  // evita warning e mantém bordas limpas o bastante para a pista.
+  shadowType: 'PCF',
+  shadowBias: -0.00005,
+  shadowNormalBias: 0.04,
+  // Tone mapping exposure — afeta brilho geral. ACESFilmic + 1.04 = leve
+  // overexposure cinematic.
+  toneMappingExposure: 1.04,
+  // envMapIntensity para pintura do carro (clearcoat). 2.35 com PMREM real
+  // do skyTexture dá reflexo de verniz bem legível em close-up.
+  envMapIntensityPaint: 2.35,
+  // Anisotropy mínimo aplicado a TODAS as texturas do GLB. GPU clampa
+  // automaticamente ao seu max (geralmente 16). Texturas do carro vistas
+  // de perspectiva (capô, lateral) ficam crisp.
+  textureAnisotropy: 16,
 };
 
 // Configuração de geração de pistas (TrackBuilder/TrackGeometry).

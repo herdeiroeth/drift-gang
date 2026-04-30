@@ -1,15 +1,21 @@
 export class CarConfig {
   constructor(opts = {}) {
     this.gravity = opts.gravity ?? 9.81;
-    this.mass = opts.mass ?? 1300.0;
+    // Defaults M4 F82 S55 stock (curb mass + transmissão DCT). Sobrescritíveis
+    // por vehicle data (src/vehicles/*.json) e por preset (TuningUI / JSON).
+    this.mass = opts.mass ?? 1565.0;
     this.inertiaScale = opts.inertiaScale ?? 1.8;
-    this.halfWidth = opts.halfWidth ?? 0.82;
-    this.cgToFrontAxle = opts.cgToFrontAxle ?? 1.35;
-    this.cgToRearAxle = opts.cgToRearAxle ?? 1.35;
-    this.cgHeight = opts.cgHeight ?? 0.50;
-    this.wheelRadius = opts.wheelRadius ?? 0.34;
-    this.wheelWidth = opts.wheelWidth ?? 0.26;
-    this.wheelMass = opts.wheelMass ?? 18.0;
+    // Half-track ~785mm (track width 1570 mm, média entre 1555f / 1582r).
+    this.halfWidth = opts.halfWidth ?? 0.785;
+    // Distribuição 52/48 frente/trás → cgToFront menor que cgToRear.
+    // Wheelbase 2.81m. CG mais perto do eixo dianteiro (mais peso na frente).
+    this.cgToFrontAxle = opts.cgToFrontAxle ?? 1.339;
+    this.cgToRearAxle = opts.cgToRearAxle ?? 1.471;
+    this.cgHeight = opts.cgHeight ?? 0.51;
+    // Raio dinâmico 275/35R19 (Performance Package) ≈ 0.337m.
+    this.wheelRadius = opts.wheelRadius ?? 0.337;
+    this.wheelWidth = opts.wheelWidth ?? 0.275;
+    this.wheelMass = opts.wheelMass ?? 22.0;
     this.unsprungMass = opts.unsprungMass ?? 28.0;
     this.sprungMass = opts.sprungMass ?? Math.max(1, this.mass - this.unsprungMass * 4);
     this.wheelInertia = 0.5 * this.wheelMass * this.wheelRadius * this.wheelRadius;
@@ -43,14 +49,17 @@ export class CarConfig {
     // Efeito real do braço pneumático puxando atrás do eixo da roda.
     this.M_kingpinChassisGain  = opts.M_kingpinChassisGain  ?? 0.08;
 
-    this.idleRPM = opts.idleRPM ?? 900;
-    this.maxRPM = opts.maxRPM ?? 7200;
-    this.gearRatios = opts.gearRatios ?? [0, -2.9, 3.6, 2.2, 1.5, 1.1, 0.85, 0.65];
-    this.diffRatio = opts.diffRatio ?? 3.8;
-    // Eficiência de transmissão (caixa H-pattern street): 92% é o real
-    // (manuais ~92-95%, diff adicional ~94-95%). Cumulativo com diff = ~87%.
-    // Antes era 0.82 que combinado com diff 0.85 dava só 0.697 (30% perdido).
-    this.transEfficiency = opts.transEfficiency ?? 0.92;
+    // Defaults M4 S55: idle 700 RPM, redline 7300 (cut hard 7600).
+    this.idleRPM = opts.idleRPM ?? 700;
+    this.maxRPM = opts.maxRPM ?? 7600;
+    // Defaults DCT 7v Getrag: 9 elementos (0=N, 1=R, 2..8=1ª..7ª).
+    // Ratios reais Getrag GS7D36SG: 4.806/2.593/1.701/1.277/1.000/0.834/0.668.
+    this.gearRatios = opts.gearRatios ?? [0, -3.20, 4.806, 2.593, 1.701, 1.277, 1.000, 0.834, 0.668];
+    // Final drive M4 DCT = 3.154 (manual S55 usa 3.46 — diferente).
+    this.diffRatio = opts.diffRatio ?? 3.154;
+    // DCT eficiência ~88% combinada (trans 92.6% × diff 95% = 88%). Antes
+    // 0.92 × 0.95 = 0.874 era manual; DCT perde mais por dual-clutch.
+    this.transEfficiency = opts.transEfficiency ?? 0.926;
 
     this.brakeTorqueMax = opts.brakeTorqueMax ?? 3200.0;
     this.brakeBiasFront = opts.brakeBiasFront ?? 0.62;
