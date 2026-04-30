@@ -26,23 +26,42 @@
 export const TIRE_AMBIENT_C  = 25;
 export const TIRE_OPTIMAL_C  = 90;
 export const TIRE_MAX_C      = 200;
-export const TIRE_HEAT_GAIN  = 1.5e-4;   // K / (W·s) — slipPower → ΔT
+// Heat gain elevado (4e-4 vs 1.5e-4 antes): cold→optimal em ~10s de slip
+// moderado em vez de ~40s. Pneu street/sport real aquece nessa faixa em
+// arrancada normal; antes o pneu vivia em grip cortado nas primeiras voltas.
+export const TIRE_HEAT_GAIN  = 4e-4;     // K / (W·s) — slipPower → ΔT
 export const TIRE_COOL_RATE  = 0.4;      // 1/s — proporcional a (T - T_ambient)
+
+// Cold-grip floor 0.92 (era 0.85): street tire moderno aquecido em garagem.
+// Ramp-up até optimal e fade pós-optimal usam smoothstep cúbico (3t² - 2t³)
+// para evitar descontinuidades de derivada nos joelhos de 60/110/150°C.
+const COLD_GRIP   = 0.92;
+const PEAK_GRIP   = 1.0;
+const FADE_GRIP   = 0.85;
+const HOT_GRIP    = 0.55;
+
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
 
 /**
  * Multiplicador de mu efetivo em função da temperatura do pneu.
- *   T < 60     → 0.85 (cold tire = pouco grip)
+ * Cubic smoothstep entre 4 zonas:
+ *   T ≤ 25     → COLD (0.92)
+ *   25..60     → smooth ramp 0.92 → 1.0
  *   60..110    → 1.0 (optimal window)
- *   110..150   → linear: 1.0 → 0.85
- *   T > 150    → linear: 0.85 → 0.55 em 200°C (heat fade)
+ *   110..150   → smooth fall 1.0 → 0.85 (heat fade leve)
+ *   150..200   → smooth fall 0.85 → 0.55 (overheat)
+ *   T > 200    → 0.55 (clamp)
  */
 export function gripFactor(T) {
-  if (T < 60)   return 0.85;
-  if (T <= 110) return 1.0;
-  if (T <= 150) return 1.0 - ((T - 110) / 40) * 0.15;
-  // overheating: 0.85 → 0.55 entre 150 e 200°C, depois clampa
-  const overheat = Math.min(50, T - 150);
-  return 0.85 - (overheat / 50) * 0.30;
+  if (T <= 25)  return COLD_GRIP;
+  if (T < 60)   return COLD_GRIP + (PEAK_GRIP - COLD_GRIP) * smoothstep(25, 60, T);
+  if (T <= 110) return PEAK_GRIP;
+  if (T <= 150) return PEAK_GRIP - (PEAK_GRIP - FADE_GRIP) * smoothstep(110, 150, T);
+  if (T <= 200) return FADE_GRIP - (FADE_GRIP - HOT_GRIP) * smoothstep(150, 200, T);
+  return HOT_GRIP;
 }
 
 // ---------------------------------------------------------------
@@ -149,13 +168,33 @@ export function pneumaticTrail(slipAngle, params = {}) {
 // ---------------------------------------------------------------
 
 /**
+ * Camber gain factor: ajusta o D lateral baseado em camber dinâmico.
+ *
+ * Em camber negativo (top da roda inclinado para dentro do carro), o pneu
+ * gera mais Fy lateral em curva porque o contato patch deforma com vantagem
+ * mecânica. Tipicamente +3-5% por grau de camber até ~3°, depois decai.
+ *
+ * Fórmula simplificada: factor = 1 + camberGainPerDeg · |camber_deg|, clamp [0.92, 1.08].
+ *
+ * @param {number} camberRad  ângulo de camber (rad), negativo = top in
+ * @returns {number} multiplicador para D lateral
+ */
+export function camberFactor(camberRad) {
+  const deg = Math.abs(camberRad) * 57.3;
+  // 4% per degree, capped a ~3° (= +12%)
+  const gain = Math.min(deg * 0.04, 0.12);
+  // Negative camber boost; positive camber penalty (rare)
+  return camberRad < 0 ? (1 + gain) : Math.max(0.92, 1 - gain * 0.5);
+}
+
+/**
  * F_y = D · sin(C · atan(B·α − E·(B·α − atan(B·α))))
  * Sinal: força lateral *opõe* ao slip angle (estabilizadora) → retorno negativo.
  *
  * @param {number} slipAngle  rad
  * @param {number} mu         coeficiente de fricção combinado pista×pneu
  * @param {number} N          carga normal (N)
- * @param {object} params     { B, C, E } opcional
+ * @param {object} params     { B, C, E, camber? } opcional
  * @returns {number} força lateral (N) — sinal oposto ao slipAngle
  */
 export function pacejkaLateral(slipAngle, mu, N, params = {}) {
@@ -163,7 +202,9 @@ export function pacejkaLateral(slipAngle, mu, N, params = {}) {
   const B = params.B ?? DEFAULT_PACEJKA_LATERAL.B;
   const C = params.C ?? DEFAULT_PACEJKA_LATERAL.C;
   const E = params.E ?? DEFAULT_PACEJKA_LATERAL.E;
-  const D = effectiveD(mu, N, params);
+  let D = effectiveD(mu, N, params);
+  // Camber boost: aumenta Fy_max em camber negativo
+  if (params.camber != null) D *= camberFactor(params.camber);
 
   const Ba = B * slipAngle;
   const inner = Ba - E * (Ba - Math.atan(Ba));
@@ -236,7 +277,13 @@ export function combinedSlipForces(slipAngle, slipRatio, mu, N, params = {}) {
   // Ambas precisam ver os mesmos `loadSensN` e `loadSensRefFz` que estão
   // no envelope `params` deste call — caso contrário Fx0 e Fy0 saem
   // computados com defaults e o círculo de fricção fica inconsistente.
-  const lateralCall = { ...lateralParams, loadSensN: params.loadSensN, loadSensRefFz: params.loadSensRefFz };
+  // `camber` é propagado só pra lateral (longitudinal não é afetado por camber).
+  const lateralCall = {
+    ...lateralParams,
+    loadSensN: params.loadSensN,
+    loadSensRefFz: params.loadSensRefFz,
+    camber: params.camber,
+  };
   const longCall = { ...(params.longitudinal ?? {}), loadSensN: params.loadSensN, loadSensRefFz: params.loadSensRefFz };
 
   const Fx0 = pacejkaLongitudinal(slipRatio, mu, N, longCall);

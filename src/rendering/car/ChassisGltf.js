@@ -50,11 +50,14 @@ export function buildChassisFromGltf(parent, gltfScene, ctx) {
   gltfScene.position.y += (targetMinY - bbox.min.y);
 
   // 5) Sombras + materiais — modo qualidade máxima
+  const materialCache = new WeakMap();
   gltfScene.traverse((node) => {
     if (!node.isMesh) return;
     node.castShadow = true;
     node.receiveShadow = true;
-    if (enhanceMaterials && node.material) enhanceMaterial(node.material, applyClearcoat);
+    if (enhanceMaterials && node.material) {
+      node.material = enhanceMaterial(node.material, applyClearcoat, materialCache);
+    }
   });
 
   parent.add(gltfScene);
@@ -74,42 +77,101 @@ export function buildChassisFromGltf(parent, gltfScene, ctx) {
 //
 // Se o material já é MeshPhysicalMaterial, mexe direto. Se for MeshStandardMaterial,
 // adiciona props compatíveis (ambos derivam do mesmo shader).
-function enhanceMaterial(mat, applyClearcoat) {
-  // Materiais podem ser arrays
-  const list = Array.isArray(mat) ? mat : [mat];
-  for (const m of list) {
-    const name = (m.name || '').toLowerCase();
+function enhanceMaterial(mat, applyClearcoat, cache) {
+  if (Array.isArray(mat)) return mat.map(m => enhanceSingleMaterial(m, applyClearcoat, cache));
+  return enhanceSingleMaterial(mat, applyClearcoat, cache);
+}
 
-    // Vidro
-    if (name.includes('glass') || name.includes('window') || name.includes('windshield')) {
-      m.transparent = true;
-      m.opacity = m.opacity ?? 0.5;
-      if ('transmission' in m) m.transmission = 0.6;
-      if ('thickness'    in m) m.thickness    = 0.05;
-      m.roughness = Math.min(m.roughness ?? 0.1, 0.1);
-      continue;
-    }
+function enhanceSingleMaterial(mat, applyClearcoat, cache) {
+  if (!mat) return mat;
+  if (cache.has(mat)) return cache.get(mat);
 
-    // Faróis / lanternas
-    if (name.includes('headlight') || name.includes('headlamp') || name.includes('front_light')) {
-      m.emissive = new THREE.Color(0xfff4d6);
-      m.emissiveIntensity = 0.6;
-      continue;
-    }
-    if (name.includes('tail') && (name.includes('light') || name.includes('lamp'))) {
-      m.emissive = new THREE.Color(0xff1818);
-      m.emissiveIntensity = 0.5;
-      continue;
-    }
+  let m = mat;
+  const name = (m.name || '').toLowerCase();
+  const isGlass = name.includes('glass') || name.includes('window') || name.includes('windshield');
+  const isLight = name.includes('headlight') || name.includes('headlamp')
+    || name.includes('front_light') || name.includes('taillight') || name.includes('tail_light')
+    || name.includes('headsignal');
+  const isRubber = name.includes('tire') || name.includes('tyre') || name.includes('rubber');
+  const isMetalTrim = name.includes('chrome') || name.includes('rim') || name.includes('wheel')
+    || name.includes('brake') || name.includes('disc') || name.includes('caliper');
+  const isPaint = name.includes('paint') || name.includes('body') || name.includes('car_body')
+    || name.includes('exterior') || name.includes('chassis');
 
-    // Pintura da carroceria — heurística: metalness > 0.3 e não é vidro/luz
-    if (applyClearcoat && (m.metalness ?? 0) > 0.3 && 'clearcoat' in m) {
-      m.clearcoat = Math.max(m.clearcoat ?? 0, 1.0);
-      m.clearcoatRoughness = m.clearcoatRoughness ?? 0.15;
-    }
+  prepareMaterialTextures(m);
 
-    // Aprimoramento geral: garantir que envMaps reflitam (Three.js puxa do
-    // scene.environment automaticamente quando MeshStandardMaterial)
-    if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.0);
+  if (isGlass) {
+    m = toPhysicalMaterial(m);
+    m.transparent = true;
+    m.opacity = Math.min(m.opacity ?? 0.62, 0.62);
+    m.roughness = Math.min(m.roughness ?? 0.08, 0.08);
+    m.metalness = Math.min(m.metalness ?? 0.0, 0.05);
+    // Transmission/refraction is expensive and can hit shader edge cases on WebGL.
+    // Opacity + environment reflection gives the right read for car glass here.
+    m.transmission = 0;
+    m.thickness = 0;
+    m.envMapIntensity = Math.max(m.envMapIntensity ?? 1, 1.25);
+  } else if (applyClearcoat && isPaint && !isMetalTrim && !isLight) {
+    m = toPhysicalMaterial(m);
+    m.roughness = Math.max(0.18, Math.min(m.roughness ?? 0.35, 0.42));
+    m.metalness = Math.max(m.metalness ?? 0, 0.12);
+    m.clearcoat = Math.max(m.clearcoat ?? 0, 0.78);
+    m.clearcoatRoughness = Math.min(m.clearcoatRoughness ?? 0.16, 0.2);
+    m.envMapIntensity = Math.max(m.envMapIntensity ?? 1, 1.35);
+  } else if (isRubber) {
+    m.roughness = Math.max(m.roughness ?? 0.85, 0.9);
+    m.metalness = Math.min(m.metalness ?? 0.02, 0.02);
+    if (m.envMapIntensity != null) m.envMapIntensity = Math.min(m.envMapIntensity, 0.65);
+  } else if (isMetalTrim) {
+    m.roughness = Math.min(m.roughness ?? 0.32, 0.42);
+    m.metalness = Math.max(m.metalness ?? 0.65, 0.7);
+    if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.15);
+  }
+
+  if (name.includes('headlight') || name.includes('headlamp') || name.includes('headsignal')) {
+    m.emissive = new THREE.Color(0xfff4d6);
+    m.emissiveIntensity = Math.max(m.emissiveIntensity ?? 0, 0.45);
+  }
+  if (name.includes('tail') && (name.includes('light') || name.includes('lamp'))) {
+    m.emissive = new THREE.Color(0xff1818);
+    m.emissiveIntensity = Math.max(m.emissiveIntensity ?? 0, 0.38);
+  }
+
+  if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.0);
+  cache.set(mat, m);
+  return m;
+}
+
+function toPhysicalMaterial(mat) {
+  if (mat.isMeshPhysicalMaterial) return mat;
+  const physical = new THREE.MeshPhysicalMaterial();
+  THREE.MeshStandardMaterial.prototype.copy.call(physical, mat);
+  physical.name = mat.name;
+  physical.userData = { ...mat.userData };
+  return physical;
+}
+
+function prepareMaterialTextures(mat) {
+  const colorMaps = ['map', 'emissiveMap'];
+  const linearMaps = [
+    'normalMap',
+    'roughnessMap',
+    'metalnessMap',
+    'aoMap',
+    'alphaMap',
+    'clearcoatMap',
+    'clearcoatRoughnessMap',
+    'clearcoatNormalMap',
+  ];
+  for (const key of colorMaps) {
+    const tex = mat[key];
+    if (!tex) continue;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = Math.max(tex.anisotropy ?? 1, 4);
+  }
+  for (const key of linearMaps) {
+    const tex = mat[key];
+    if (!tex) continue;
+    tex.anisotropy = Math.max(tex.anisotropy ?? 1, 4);
   }
 }

@@ -6,6 +6,7 @@
 // uma única vez como o asfalto baked).
 
 import * as THREE from 'three';
+import { createAsphaltDetailMaps } from '../rendering/materials/Asphalt.js';
 
 // Asfalto da pista com road markings bakedos: linhas brancas laterais
 // + tracejado central. Cobre a pista TODA uma vez (não tile longitudinal).
@@ -66,8 +67,19 @@ export function createTrackAsphaltTexture(totalLength, width) {
   // Não tile lateral nem longitudinal — textura cobre tudo uma vez.
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 8;
   return tex;
+}
+
+export function createTrackAsphaltDetailMaps(totalLength, width) {
+  const tileMeters = 3.2;
+  return createAsphaltDetailMaps({
+    seed: 3907,
+    repeatX: Math.max(1, width / tileMeters),
+    repeatY: Math.max(1 / totalLength, 1 / tileMeters),
+    anisotropy: 8,
+  });
 }
 
 // Padrão xadrez preto/branco — pra linha de chegada visual. 64×64, tileable.
@@ -85,6 +97,7 @@ export function createCheckerTexture(squares = 8) {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
   tex.magFilter = THREE.NearestFilter;  // pixels nítidos no padrão xadrez
   return tex;
 }
@@ -117,6 +130,7 @@ export function createGrassTexture() {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
 
@@ -151,5 +165,6 @@ export function createCurbTexture() {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }

@@ -92,8 +92,39 @@ export class CarConfig {
 
     this.rollCenterHeightFront = opts.rollCenterHeightFront ?? 0.08;
     this.rollCenterHeightRear = opts.rollCenterHeightRear ?? 0.12;
-    this.geometricLoadTransferScale = opts.geometricLoadTransferScale ?? 0.35;
-    this.longitudinalLoadTransferScale = opts.longitudinalLoadTransferScale ?? 0.25;
+
+    // Anti-dive (front, em freada) e anti-squat (rear, em aceleração).
+    // Percentages [0..1] da parcela do load transfer longitudinal que é
+    // absorvida pela GEOMETRIA da suspensão (instant center, control arm
+    // angles), reduzindo o pitch do chassi.
+    //   - 0.0 = sem geometria, todo transfer pela mola (carro "mergulha")
+    //   - 1.0 = 100% geometria, sem dive/squat (rígido demais)
+    // 0.30 / 0.25 são valores típicos de carro sport street (BMW M tem ~30%
+    // anti-dive, ~25% anti-squat). Drift cars often run lower antiSquat para
+    // facilitar o weight transfer e quebrar a traseira mais facilmente.
+    this.antiDiveFront = opts.antiDiveFront ?? 0.30;
+    this.antiSquatRear = opts.antiSquatRear ?? 0.25;
+
+    // Relaxation length do pneu — distância (m) que o pneu precisa rolar
+    // para o slip angle "estabilizar" no contato patch. Tipicamente 0.3-0.5m
+    // para pneus street. Implementado como low-pass filter no Wheel.js.
+    this.relaxationLength = opts.relaxationLength ?? 0.30;
+
+    // Camber gain dinâmico: quanto o camber muda com 1m de deflexão da
+    // suspensão (rad/m). Real BMW M com double-wishbone: ~-0.5 deg/inch =
+    // ~-0.34 rad/m. Negativo = mais negative camber quando comprime (bom
+    // pra grip lateral em curva). Modificador de D lateral baseado nisso.
+    this.camberGainPerMeter = opts.camberGainPerMeter ?? -0.30;
+    this.camberStaticFront  = opts.camberStaticFront  ?? -0.025;  // -1.4° street perf
+    this.camberStaticRear   = opts.camberStaticRear   ?? -0.020;  // -1.1°
+    // Scales recalibradas (geo 0.35→0.7, long 0.25→0.6): antes a
+    // transferência de peso instantânea via roll center / pitch geométrico
+    // estava sub-escalada, e o pneu externo em curva 1G mal saía da
+    // carga estática — Fy_max < demanda centrípeta = "manteiga nas rodas".
+    // 0.7 deixa ~70% do load transfer chegar instantâneo (resto via
+    // dinâmica de spring); 0.6 idem em longitudinal sob freada/aceleração.
+    this.geometricLoadTransferScale = opts.geometricLoadTransferScale ?? 0.70;
+    this.longitudinalLoadTransferScale = opts.longitudinalLoadTransferScale ?? 0.60;
 
     this.pitchDamp = opts.pitchDamp ?? 7.0;
     this.rollDamp = opts.rollDamp ?? 7.5;

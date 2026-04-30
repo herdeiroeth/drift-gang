@@ -1,11 +1,23 @@
 {
   "name": "Track",
-  "description": "LSD com mais coast lock pra estabilizar curva, brake bias dianteiro, gear longo",
+  "description": "LSD com coast lock alto, anti-dive/squat fortes, camber generoso, RL médio — rápido em pista",
   "finalDrive": 3.40,
   "gearRatios": [0, -2.9, 3.40, 2.10, 1.55, 1.20, 0.95, 0.75],
   "differential": { "type": "lsd_clutch", "preload": 80, "powerLock": 0.30, "coastLock": 0.40 },
   "tcMode": "off",
   "brakeBiasFront": 0.62,
   "engineInertia": 0.20,
-  "turboMaxBoost": 0.6
+  "turboMaxBoost": 0.6,
+  "tire": {
+    "mu": 1.30,
+    "loadSensN": 0.88,
+    "relaxationLength": 0.30
+  },
+  "suspension": {
+    "antiDiveFront": 0.50,
+    "antiSquatRear": 0.40,
+    "camberStaticFront": -0.040,
+    "camberStaticRear": -0.025,
+    "camberGainPerMeter": -0.45
+  }
 }

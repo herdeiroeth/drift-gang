@@ -48,6 +48,16 @@ export class HUDManager {
       document.body.appendChild(ttDiv);
       this.ui.tireTemps = ttDiv;
     }
+    // Probe de grip por roda — ajuda a diagnosticar "manteiga nas rodas":
+    // mostra normalLoad, mu_efetivo, Fy_max disponível e Fy_atual com %
+    // de saturação. Verde/amarelo/vermelho indica margem de grip.
+    if (!this.ui.gripProbe) {
+      const gp = document.createElement('div');
+      gp.id = 'grip-probe';
+      gp.style.cssText = 'position:absolute;bottom:200px;left:20px;font-size:11px;font-family:monospace;color:#ccc;line-height:1.35;background:rgba(0,0,0,0.35);padding:4px 8px;border-radius:3px;';
+      document.body.appendChild(gp);
+      this.ui.gripProbe = gp;
+    }
     // Barra de progresso de troca de marcha (visível só durante isShifting).
     // Posicionada à direita do indicador de gear, fica visível 100-300ms.
     if (!this.ui.shiftBar) {
@@ -75,6 +85,44 @@ export class HUDManager {
       document.body.appendChild(div);
       this.ui.shiftBlocked = div;
     }
+    // Boost gauge (PSI horizontal bar, azul → vermelho conforme sobe)
+    if (!this.ui.boostBar) {
+      const wrap = document.createElement('div');
+      wrap.id = 'boost-bar';
+      wrap.style.cssText = 'position:absolute;bottom:42px;left:20px;width:240px;height:6px;background:rgba(0,0,0,0.45);border:1px solid #333;border-radius:2px;overflow:hidden;';
+      const fill = document.createElement('div');
+      fill.id = 'boost-bar-fill';
+      fill.style.cssText = 'height:100%;width:0%;background:#4eb1ff;transition:width 80ms linear, background 80ms linear;';
+      wrap.appendChild(fill);
+      const lbl = document.createElement('div');
+      lbl.id = 'boost-bar-lbl';
+      lbl.style.cssText = 'position:absolute;bottom:50px;left:265px;font-size:10px;font-family:monospace;color:#88c0ff;';
+      lbl.textContent = 'BOOST';
+      document.body.appendChild(wrap);
+      document.body.appendChild(lbl);
+      this.ui.boostBar = wrap;
+      this.ui.boostBarFill = fill;
+    }
+
+    // Clutch slip bar (laranja, cresce com slipPercent)
+    if (!this.ui.clutchBar) {
+      const wrap = document.createElement('div');
+      wrap.id = 'clutch-bar';
+      wrap.style.cssText = 'position:absolute;bottom:30px;left:20px;width:240px;height:6px;background:rgba(0,0,0,0.45);border:1px solid #333;border-radius:2px;overflow:hidden;';
+      const fill = document.createElement('div');
+      fill.id = 'clutch-bar-fill';
+      fill.style.cssText = 'height:100%;width:0%;background:#ffba2a;transition:width 60ms linear;';
+      wrap.appendChild(fill);
+      const lbl = document.createElement('div');
+      lbl.id = 'clutch-bar-lbl';
+      lbl.style.cssText = 'position:absolute;bottom:38px;left:265px;font-size:10px;font-family:monospace;color:#ffba2a;';
+      lbl.textContent = 'CLUTCH';
+      document.body.appendChild(wrap);
+      document.body.appendChild(lbl);
+      this.ui.clutchBar = wrap;
+      this.ui.clutchBarFill = fill;
+    }
+
     // RPM bar (visualização tipo tach digital). Vermelho perto do redline.
     if (!this.ui.rpmBar) {
       const bar = document.createElement('div');
@@ -126,8 +174,33 @@ export class HUDManager {
       this.ui.gear.textContent = g === 1 ? 'R' : (g === 0 ? 'N' : (g - 1) + 'ª');
     }
 
-    // ----- RPM bar (verde → laranja → vermelho conforme aproxima do redline) -----
     const pt = telem.powertrain;
+
+    // ----- Boost gauge -----
+    if (this.ui.boostBarFill && pt) {
+      const psi = pt.boostPsi ?? 0;
+      const maxPsi = pt.maxBoostPsi ?? 21.7;  // 1.5 bar · 14.5
+      const pct = Math.min(100, Math.max(0, (psi / maxPsi) * 100));
+      this.ui.boostBarFill.style.width = pct + '%';
+      // Azul → ciano → vermelho conforme sobe
+      const norm = pct / 100;
+      let color;
+      if (norm < 0.4)      color = '#4eb1ff';   // azul claro
+      else if (norm < 0.7) color = '#4cffe0';   // ciano
+      else if (norm < 0.9) color = '#ffba2a';   // laranja
+      else                  color = '#ff4040';   // vermelho (overboost)
+      this.ui.boostBarFill.style.background = color;
+    }
+
+    // ----- Clutch slip bar -----
+    if (this.ui.clutchBarFill && pt) {
+      const slip = Math.max(0, Math.min(1, pt.clutchSlip ?? 0));
+      this.ui.clutchBarFill.style.width = (slip * 100) + '%';
+      // Laranja em slip baixo, vermelho em slip alto (>70%)
+      this.ui.clutchBarFill.style.background = slip > 0.7 ? '#ff6040' : '#ffba2a';
+    }
+
+    // ----- RPM bar (verde → laranja → vermelho conforme aproxima do redline) -----
     if (this.ui.rpmBarFill && pt) {
       const rpm = Math.max(0, telem.rpm);
       const max = pt.engineMaxRPM ?? 7500;
@@ -214,6 +287,35 @@ export class HUDManager {
           parts.push(`<span style="color:${color};">${labels[i]}:${Math.round(t)}</span>`);
         }
         this.ui.tireTemps.innerHTML = parts.join(' ');
+      }
+    }
+
+    if (this.ui.gripProbe && isPlaying) {
+      const wd = telem.wheelData;
+      if (wd && wd.length >= 4) {
+        const labels = ['FL', 'FR', 'RL', 'RR'];
+        const lines = ['<span style="color:#888;">GRIP    N(kN)  μ    Fy_max  Fy   sat</span>'];
+        for (let i = 0; i < 4; i++) {
+          const w = wd[i] || {};
+          const N    = (w.normalLoad ?? 0) / 1000;       // kN
+          const mu   = w.muEffective ?? 0;
+          const FyM  = (w.FyMax ?? 0) / 1000;            // kN
+          const Fy   = Math.abs(w.lateralForce ?? 0) / 1000;
+          const sat  = FyM > 0.001 ? Math.min(1.5, Fy / FyM) : 0;
+          const pct  = Math.round(sat * 100);
+          let color;
+          if (sat < 0.70)      color = '#4ce04c';
+          else if (sat < 0.90) color = '#ffba2a';
+          else                  color = '#ff4040';
+          lines.push(
+            `<span style="color:#aaa;">${labels[i]}</span> ` +
+            `<span style="color:#ddd;">${N.toFixed(2).padStart(5)}</span> ` +
+            `<span style="color:#ddd;">${mu.toFixed(2)}</span> ` +
+            `<span style="color:#ddd;">${FyM.toFixed(2).padStart(5)}</span> ` +
+            `<span style="color:${color};">${Fy.toFixed(2).padStart(4)} ${pct.toString().padStart(3)}%</span>`,
+          );
+        }
+        this.ui.gripProbe.innerHTML = lines.join('<br>');
       }
     }
 

@@ -25,16 +25,27 @@ python3 ~/.agents/skills/sketchfab/scripts/sketchfab.py model:download \
   <UID> --format glb --out ./public/models/
 ```
 
-## Pipeline de otimização (opcional)
+## Pipeline de otimização (recomendado)
 
-Se o FPS cair em hardware modesto, decimar o modelo offline:
+O jogo tenta carregar primeiro `bmw_m4_f82.opt.glb` e cai para `bmw_m4_f82.glb`
+se o otimizado não existir. Para gerar o arquivo otimizado mantendo a hierarquia
+e os nomes usados pelo rig/luzes do jogo:
 
 ```bash
 npx --yes @gltf-transform/cli optimize \
   ./public/models/bmw_m4_f82.glb \
   ./public/models/bmw_m4_f82.opt.glb \
   --texture-compress webp \
-  --simplify --simplify-ratio 0.5
+  --texture-size 1024 \
+  --compress meshopt \
+  --meshopt-level medium \
+  --simplify true \
+  --simplify-ratio 0.72 \
+  --simplify-error 0.0002 \
+  --flatten false \
+  --join false \
+  --join-meshes false \
+  --join-named false \
+  --instance false \
+  --palette false
 ```
-
-Atualizar `gltfBody.url` em [`src/rendering/car/CarVisualConfig.js`](../../src/rendering/car/CarVisualConfig.js) para apontar pro arquivo otimizado.

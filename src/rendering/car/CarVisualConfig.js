@@ -10,7 +10,8 @@ export const VISUAL_CFG = {
   // pra procedural se o asset falhar ou rodas não puderem ser extraídas.
   gltfBody: {
     enabled:          true,
-    url:              '/models/bmw_m4_f82.glb',
+    // Prefer the local optimized GLB when present; fall back to the source asset.
+    url:              ['/models/bmw_m4_f82.opt.glb', '/models/bmw_m4_f82.glb'],
     // Comprimento total = wheelBase × scaleFactor. 1.55 ≈ proporção típica
     // de carros esportivos (BMW M4 F82 real: wheelBase 2.81m, length 4.67m → 1.66).
     scaleFactor:      1.66,
@@ -26,6 +27,9 @@ export const VISUAL_CFG = {
     syncWheelGeometryFromGltf: true,
     // Centraliza os wheel wells do GLB no eixo físico atual antes de extrair as rodas.
     alignWheelWellsToPhysics: true,
+    // Offset lateral extra por lado nas rodas traseiras do GLB. O modelo fica
+    // visualmente melhor com a traseira um pouco mais para fora dos paralamas.
+    rearWheelOutboardOffset: 0.08,
     // Debug/legado: desenhar suspensão/drivetrain procedural por cima do GLB.
     // Default false para usar a mecânica visível que já vem no asset.
     showProceduralUndercarriage: false,

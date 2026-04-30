@@ -175,6 +175,12 @@ export class SuspensionCorner {
     this.arbForce = arbForce;
     this.geoLoad = geoLoad;
     this.suspensionForce = this.suspensionForceBase + arbForce;
-    this.normalLoad = grounded ? Math.max(0, this.tireForce + arbForce + geoLoad) : 0;
+    // ARB já entra no balanço de forças que dirige `wheelVy` em `update()`
+    // (linha do `forceOnWheel`), modificando a deflexão do pneu e logo
+    // `tireForce`. Somá-lo de novo aqui era double-counting que zerava o
+    // grip da roda interna em curva pesada via clamp `max(0, ...)`.
+    // `geoLoad` permanece: representa a transferência geométrica via roll
+    // center / linkage rígida que NÃO passa pela mola — atalho instantâneo.
+    this.normalLoad = grounded ? Math.max(0, this.tireForce + geoLoad) : 0;
   }
 }

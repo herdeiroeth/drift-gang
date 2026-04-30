@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { CarConfig } from './CarConfig.js';
 import { Wheel } from './Wheel.js';
 import { PowertrainSystem } from '../powertrain.js';
-import { GAME_CFG, PHYSICS_CFG } from '../core/constants.js';
+import { GAME_CFG, PHYSICS_CFG, SURFACE_MU } from '../core/constants.js';
 import { CarVisuals } from '../rendering/car/CarVisuals.js';
-import { pneumaticTrail } from './Tire.js';
+import { pneumaticTrail, gripFactor, effectiveD } from './Tire.js';
 import { VISUAL_CFG } from '../rendering/car/CarVisualConfig.js';
 import { buildChassisFromGltf } from '../rendering/car/ChassisGltf.js';
 import { measureWheelLayoutFromGltf } from '../rendering/car/loaders/extractWheels.js';
@@ -121,6 +121,7 @@ export class Car {
     });
 
     const hw = c.halfWidth;
+    const rearHw = hw + (this.opts.gltfScene ? (VISUAL_CFG.gltfBody.rearWheelOutboardOffset ?? 0) : 0);
     const fAxle = c.cgToFrontAxle;
     const rAxle = -c.cgToRearAxle;
     const attachY = 0.12;
@@ -129,12 +130,13 @@ export class Car {
     this.wheels = [
       new Wheel(scene, new THREE.Vector3(-hw, attachY, fAxle), true, c),
       new Wheel(scene, new THREE.Vector3( hw, attachY, fAxle), true, c),
-      new Wheel(scene, new THREE.Vector3(-hw, attachY, rAxle), false, c),
-      new Wheel(scene, new THREE.Vector3( hw, attachY, rAxle), false, c),
+      new Wheel(scene, new THREE.Vector3(-rearHw, attachY, rAxle), false, c),
+      new Wheel(scene, new THREE.Vector3( rearHw, attachY, rAxle), false, c),
     ];
 
     this.initialY = this.computeStaticRideHeight();
     this.position.y = this.initialY;
+    this._syncMeshPose();
     for (const w of this.wheels) {
       w.resetSuspension(this.position, this.heading, this.pitch, this.roll, this.groundObjects);
     }
@@ -146,6 +148,17 @@ export class Car {
   }
 
   wheelWorld(i) { return this.wheels[i].getWorldPosition(); }
+
+  _syncMeshPose() {
+    this.mesh.position.copy(this.position);
+    this.mesh.rotation.set(this.pitch, this.heading, -this.roll, 'YXZ');
+  }
+
+  _syncWheelVisualPoses() {
+    for (const w of this.wheels) {
+      w.syncVisualPose(this.position, this.heading, this.pitch, this.roll);
+    }
+  }
 
   _measureGltfWheelLayout(gltfScene) {
     const cfg = VISUAL_CFG.gltfBody;
@@ -228,8 +241,8 @@ export class Car {
       w.tireTemp = 25;  // ambient
       w.resetSuspension(this.position, this.heading, this.pitch, this.roll, this.groundObjects);
     }
-    this.mesh.position.set(x, this.initialY, z);
-    this.mesh.rotation.set(0, heading, 0);
+    this._syncMeshPose();
+    this._syncWheelVisualPoses();
   }
 
   applySmoothSteer(steerInput, dt) {
@@ -311,14 +324,39 @@ export class Car {
 
     const ax = this.accelLocal.x || 0;
     const ay = this.accelLocal.z || 0;
-    const longTransfer = c.mass * ax * c.cgHeight / c.wheelBase * c.longitudinalLoadTransferScale;
+    const longTransferRaw = c.mass * ax * c.cgHeight / c.wheelBase * c.longitudinalLoadTransferScale;
+
+    // Anti-dive (front, em freada ax<0) e anti-squat (rear, em aceleração ax>0)
+    // são percentages [0..1] que reduzem a parcela do load transfer LONGITUDINAL
+    // que vai pela mola — o resto é absorvido pela GEOMETRIA da suspensão
+    // (instant centers, control arm angles). Quanto mais antiDive, menos o
+    // nariz mergulha em freada brusca; quanto mais antiSquat, menos a traseira
+    // afunda em aceleração WOT.
+    //   ax < 0 (freando)     → front comprime, rear descomprime → antiDive_front afeta front
+    //   ax > 0 (acelerando)  → rear comprime, front descomprime → antiSquat_rear afeta rear
+    const antiDiveFront = c.antiDiveFront ?? 0.30;
+    const antiSquatRear = c.antiSquatRear ?? 0.25;
+    // Aplica conforme direção do load transfer:
+    //   - braking (ax<0): a roda que recebe carga é a FRONT → antiDive
+    //   - accel (ax>0):   a roda que recebe carga é a REAR → antiSquat
+    let longTransferFront = -longTransferRaw * 0.5;  // negativo se ax>0 (alivia front)
+    let longTransferRear  =  longTransferRaw * 0.5;  // positivo se ax>0 (carrega rear)
+    if (ax < 0) {
+      // Freada: front carrega, rear alivia
+      longTransferFront *= (1 - antiDiveFront);   // dive reduzido
+      // longTransferRear não muda (alívio do rear é "gratuito")
+    } else if (ax > 0) {
+      // Aceleração: rear carrega, front alivia
+      longTransferRear  *= (1 - antiSquatRear);   // squat reduzido
+    }
+
     const frontLat = c.mass * c.axleWeightRatioFront * ay * c.rollCenterHeightFront / c.trackWidth * c.geometricLoadTransferScale;
     const rearLat  = c.mass * c.axleWeightRatioRear  * ay * c.rollCenterHeightRear  / c.trackWidth * c.geometricLoadTransferScale;
 
     const apply = (w, arbForce, latTransfer) => {
       const side = Math.sign(w.offsetLocal.x) || 1;
       const latLoad = -side * latTransfer;
-      const longLoad = w.isFront ? -longTransfer * 0.5 : longTransfer * 0.5;
+      const longLoad = w.isFront ? longTransferFront : longTransferRear;
       w.applySuspensionLoads(arbForce, latLoad + longLoad);
     };
 
@@ -418,6 +456,14 @@ export class Car {
         shiftDown: false,
         speedMS: this.absVel,
       };
+      // Powertrain a 240Hz (mesmo sub-step do chassis). Inner sub-step 4×
+      // foi tentado mas causou problema de sub-amostragem: motor oscila
+      // ±28 rad/s em 4 iters perto da fronteira slip↔stick, e a roda só
+      // vê o ÚLTIMO transmittedTorque por chassis sub-step → drive torque
+      // alternava sinal aleatoriamente, freando arrancada. Solução AAA real
+      // (BeamNG/ACC) é integrar o motor implicitamente, não sub-amostrar.
+      // Pra esse projeto, 240Hz é suficiente — motor-clutch tau~4ms, dt=4.2ms
+      // está marginal mas estável.
       ptResult = this.powertrain.update(sdt, ptInputs, this.wheels);
 
       rl.driveTorque = ptResult.wheelTorques.rl;
@@ -454,9 +500,21 @@ export class Car {
 
       // Inércia equivalente vista pela roda traseira: I_eq = I_wheel + (I_engine·(gear·diff)²)/2
       // — divisão por 2 porque o torque é dividido entre as duas rodas traseiras.
+      //
+      // CRÍTICO: refletir a inércia do motor APENAS quando clutch acoplado
+      // (stick). Em SLIPPING (wheelspin sustentado, arrancada com clutch
+      // parcial), o motor está "solto" do drivetrain — a roda só carrega
+      // sua própria I_wheel. Sem essa distinção, em wheelspin a roda fica
+      // com I_eff ~1.7 kg·m² e desacelera 15× mais devagar que deveria;
+      // o slipRatio satura permanentemente em 1.0 e o carro desacelera
+      // (caso reportado: travado em 4ª/5ª/6ª com sr=1.00 sustentado).
       let effectiveRearInertia = c.wheelInertia;
       const ptGearRatio = this.powertrain.gearbox.getGearRatio();
-      if (!this.powertrain.gearbox.isShifting && this.powertrain.gearbox.currentGear !== 0 && Math.abs(ptGearRatio) > 0.01) {
+      const clutchEngaged = !this.powertrain.clutch.isSlipping;
+      if (!this.powertrain.gearbox.isShifting
+          && this.powertrain.gearbox.currentGear !== 0
+          && Math.abs(ptGearRatio) > 0.01
+          && clutchEngaged) {
         effectiveRearInertia += (this.powertrain.engine.inertia * Math.pow(ptGearRatio * c.diffRatio, 2)) / 2;
       }
 
@@ -483,6 +541,16 @@ export class Car {
         totalFz += fz;
         yawTorque += fz * w.offsetLocal.z - fx * w.offsetLocal.x;
 
+        // Probes de grip (HUD/diagnóstico). muEffective = mu_base × gripFactor(T) × surface;
+        // Fy_max é o D do Pacejka pós-load-sensitivity sublinear — força lateral máxima
+        // disponível com a carga atual. Comparar com `lateralForce` mostra quanta margem o
+        // pneu ainda tem (Fy/Fy_max → 1 = saturado; →0.5 = sobra grip).
+        const muEff = c.mu * gripFactor(w.tireTemp) * (SURFACE_MU[w.currentSurface] ?? 1.0);
+        const FyMax = effectiveD(muEff, w.normalLoad, {
+          loadSensN: c.loadSensN,
+          loadSensRefFz: c.loadSensRefFz,
+        });
+
         wheelData.push({
           slipAngle: w.slipAngle,
           slipRatio: w.slipRatio,
@@ -497,6 +565,11 @@ export class Car {
           fx, fz,
           angularVel: w.angularVelocity,
           tireTemp: w.tireTemp,
+          muEffective: muEff,
+          FyMax,
+          lateralForce: w.lateralForce,
+          longitudinalForce: w.longitudinalForce,
+          surface: w.currentSurface,
         });
       }
 
@@ -538,9 +611,10 @@ export class Car {
       this.position.x += this.velocity.x * sdt;
       this.position.z += this.velocity.z * sdt;
 
-      this.mesh.position.copy(this.position);
-      this.mesh.rotation.set(this.pitch, this.heading, -this.roll);
+      this._syncMeshPose();
     }
+
+    this._syncWheelVisualPoses();
 
     return { wheelData, rpm: this.rpm, gear: this.gear, powertrain: ptResult };
   }
@@ -612,6 +686,22 @@ export class Car {
       if (typeof s.damperReboundRear === 'number') cfg.damperReboundRear = s.damperReboundRear;
       if (typeof s.antiRollFront === 'number') cfg.antiRollFront = s.antiRollFront;
       if (typeof s.antiRollRear === 'number') cfg.antiRollRear = s.antiRollRear;
+      // Fase 4: anti-dive, anti-squat, camber dinâmico
+      if (typeof s.antiDiveFront === 'number')      cfg.antiDiveFront = s.antiDiveFront;
+      if (typeof s.antiSquatRear === 'number')      cfg.antiSquatRear = s.antiSquatRear;
+      if (typeof s.camberStaticFront === 'number')  cfg.camberStaticFront = s.camberStaticFront;
+      if (typeof s.camberStaticRear === 'number')   cfg.camberStaticRear = s.camberStaticRear;
+      if (typeof s.camberGainPerMeter === 'number') cfg.camberGainPerMeter = s.camberGainPerMeter;
+    }
+
+    // Fase 4: tire props (mu, loadSensN, relaxationLength, driftBias)
+    if (p.tire && cfg) {
+      const t = p.tire;
+      if (typeof t.mu === 'number')                cfg.mu = t.mu;
+      if (typeof t.loadSensN === 'number')         cfg.loadSensN = t.loadSensN;
+      if (typeof t.loadSensRefFz === 'number')     cfg.loadSensRefFz = t.loadSensRefFz;
+      if (typeof t.relaxationLength === 'number')  cfg.relaxationLength = t.relaxationLength;
+      if (typeof t.tireDriftBias === 'number')     cfg.tireDriftBias = t.tireDriftBias;
     }
   }
 
@@ -654,6 +744,11 @@ export class Car {
       brakeInput = gas;
       throttleInput = 0;
     }
+
+    // Expor inputs efetivos para CarVisuals (brake lights, etc).
+    this.brake = brakeInput;
+    this.throttle = throttleInput;
+    this.handbrake = hb;
 
     // Manual: Q downshift, E upshift. Ambos respeitam gating (overrev/bog/cooldown).
     // Se bloqueado, gearbox.lastBlockedReason fica setado e o HUD pisca o motivo.

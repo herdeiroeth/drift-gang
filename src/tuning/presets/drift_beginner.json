@@ -1,11 +1,23 @@
 {
   "name": "Drift Beginner",
-  "description": "LSD clutch-pack moderado, gear ratios curtos, fácil iniciar slide",
+  "description": "Pneu agarrado, anti-dive forte, LSD moderado — slide previsível, recuperação fácil",
   "finalDrive": 4.10,
   "gearRatios": [0, -2.9, 3.16, 1.88, 1.33, 1.0, 0.81, 0.65],
   "differential": { "type": "lsd_clutch", "preload": 60, "powerLock": 0.45, "coastLock": 0.25 },
   "tcMode": "low",
   "brakeBiasFront": 0.55,
   "engineInertia": 0.18,
-  "turboMaxBoost": 0.8
+  "turboMaxBoost": 0.8,
+  "tire": {
+    "mu": 1.25,
+    "loadSensN": 0.90,
+    "relaxationLength": 0.40
+  },
+  "suspension": {
+    "antiDiveFront": 0.45,
+    "antiSquatRear": 0.35,
+    "camberStaticFront": -0.020,
+    "camberStaticRear": -0.015,
+    "camberGainPerMeter": -0.20
+  }
 }

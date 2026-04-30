@@ -6,6 +6,7 @@ import {
   createCurbTexture,
   createGrassTexture,
   createTrackAsphaltTexture,
+  createTrackAsphaltDetailMaps,
   createCheckerTexture,
 } from './TrackTextures.js';
 import { TRACK_CFG } from '../core/constants.js';
@@ -44,12 +45,16 @@ export function buildTrack(scene, trackData) {
   // UV-V do mesh está em metros; repeat = 1/totalLength → textura cobre uma vez.
   asphaltTex.repeat.set(1, 1 / totalLength);
   asphaltTex.needsUpdate = true;
+  const asphaltDetailMaps = createTrackAsphaltDetailMaps(totalLength, trackData.width);
 
   const asphaltMat = new THREE.MeshStandardMaterial({
     map: asphaltTex,
-    roughness: 0.92,
-    metalness: 0.05,
-    color: 0xb0b0b0,   // mais claro pra markings brilharem
+    normalMap: asphaltDetailMaps.normalMap,
+    roughnessMap: asphaltDetailMaps.roughnessMap,
+    normalScale: new THREE.Vector2(0.5, 0.5),
+    roughness: 0.96,
+    metalness: 0.0,
+    color: 0xffffff,
   });
   const asphalt = new THREE.Mesh(asphaltGeo, asphaltMat);
   asphalt.receiveShadow = true;

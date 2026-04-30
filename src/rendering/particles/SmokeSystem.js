@@ -12,8 +12,13 @@ export class SmokeSystem {
     this.vel = new Float32Array(max * 3);
     this.geometry.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
     const mat = new THREE.PointsMaterial({
-      color: 0xbbbbbb, size: 0.6, transparent: true, opacity: 0.35,
-      depthWrite: false, sizeAttenuation: true,
+      color: 0xbbbbbb,
+      size: 0.8,
+      map: makeSmokeTexture(),
+      transparent: true,
+      opacity: 0.35,
+      depthWrite: false,
+      sizeAttenuation: true,
     });
     this.mesh = new THREE.Points(this.geometry, mat);
     this.mesh.frustumCulled = false;
@@ -43,4 +48,32 @@ export class SmokeSystem {
     }
     this.geometry.attributes.position.needsUpdate = true;
   }
+}
+
+let smokeTexture = null;
+
+function makeSmokeTexture() {
+  if (smokeTexture) return smokeTexture;
+
+  const size = 96;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+
+  const ctx = canvas.getContext('2d');
+  const center = size * 0.5;
+  const gradient = ctx.createRadialGradient(center, center, 0, center, center, center);
+  gradient.addColorStop(0.0, 'rgba(255,255,255,0.72)');
+  gradient.addColorStop(0.35, 'rgba(255,255,255,0.42)');
+  gradient.addColorStop(0.72, 'rgba(255,255,255,0.12)');
+  gradient.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+
+  smokeTexture = new THREE.CanvasTexture(canvas);
+  smokeTexture.minFilter = THREE.LinearFilter;
+  smokeTexture.magFilter = THREE.LinearFilter;
+  smokeTexture.generateMipmaps = false;
+  return smokeTexture;
 }

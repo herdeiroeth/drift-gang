@@ -1,52 +1,94 @@
 import * as THREE from 'three';
+import {
+  createAsphaltMaps,
+  createAsphaltMaterial,
+} from './materials/Asphalt.js';
 
 export function createAsphaltTexture() {
+  return createAsphaltMaps({ repeatX: 40, repeatY: 40 }).map;
+}
+
+export function createOpenArenaAsphaltMaterial() {
+  return createAsphaltMaterial({ repeatX: 46, repeatY: 46, seed: 2619, normalStrength: 0.64 });
+}
+
+function createDaySkyTexture() {
+  const width = 512;
+  const height = 256;
   const canvas = document.createElement('canvas');
-  canvas.width = 512; canvas.height = 512;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#2a2a32';
-  ctx.fillRect(0, 0, 512, 512);
-  for (let i = 0; i < 40000; i++) {
-    const x = Math.random() * 512;
-    const y = Math.random() * 512;
-    const v = 30 + Math.random() * 30;
-    ctx.fillStyle = `rgba(${v},${v},${v + 5},${0.15 + Math.random() * 0.15})`;
-    ctx.fillRect(x, y, 1 + Math.random() * 2, 1 + Math.random() * 2);
+
+  const top = new THREE.Color(0x6aa7de);
+  const zenith = new THREE.Color(0x8fc4ef);
+  const horizon = new THREE.Color(0xd9edf8);
+  const ground = new THREE.Color(0x86936f);
+  const col = new THREE.Color();
+
+  const row = ctx.createImageData(width, 1);
+  for (let y = 0; y < height; y++) {
+    const v = y / (height - 1);
+    if (v < 0.52) {
+      const t = v / 0.52;
+      col.copy(top).lerp(zenith, t);
+    } else if (v < 0.64) {
+      const t = (v - 0.52) / 0.12;
+      col.copy(zenith).lerp(horizon, t);
+    } else {
+      const t = (v - 0.64) / 0.36;
+      col.copy(horizon).lerp(ground, t);
+    }
+    for (let x = 0; x < width; x++) {
+      const p = x * 4;
+      row.data[p + 0] = Math.round(col.r * 255);
+      row.data[p + 1] = Math.round(col.g * 255);
+      row.data[p + 2] = Math.round(col.b * 255);
+      row.data[p + 3] = 255;
+    }
+    ctx.putImageData(row, 0, y);
   }
-  for (let i = 0; i < 20; i++) {
-    const x = Math.random() * 512;
-    ctx.fillStyle = 'rgba(20,20,25,0.08)';
-    ctx.fillRect(x, 0, 2 + Math.random() * 4, 512);
-  }
+
+  const sun = ctx.createRadialGradient(width * 0.78, height * 0.38, 2, width * 0.78, height * 0.38, 54);
+  sun.addColorStop(0, 'rgba(255,246,214,0.95)');
+  sun.addColorStop(0.18, 'rgba(255,239,196,0.38)');
+  sun.addColorStop(1, 'rgba(255,239,196,0)');
+  ctx.fillStyle = sun;
+  ctx.fillRect(0, 0, width, height);
+
   const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(40, 40);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
   return tex;
 }
 
 export function setupEnv(scene) {
-  scene.fog = new THREE.Fog(0x1a0b2e, 40, 160);
-  const vs = `varying vec3 vWorldPosition; void main(){ vec4 w=modelMatrix*vec4(position,1.0); vWorldPosition=w.xyz; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`;
-  const fs = `varying vec3 vWorldPosition; void main(){ vec3 top=vec3(0.06,0.02,0.15); vec3 bottom=vec3(0.95,0.35,0.45); float h=normalize(vWorldPosition).y; vec3 col=mix(bottom,top,max(0.0,h*0.5+0.5)); gl_FragColor=vec4(col,1.0); }`;
-  const sky = new THREE.Mesh(
-    new THREE.SphereGeometry(250, 32, 32),
-    new THREE.ShaderMaterial({ vertexShader: vs, fragmentShader: fs, side: THREE.BackSide })
-  );
-  scene.add(sky);
+  const skyTexture = createDaySkyTexture();
+  scene.background = skyTexture;
+  scene.environment = skyTexture;
+  scene.fog = new THREE.Fog(0xd9edf8, 95, 420);
+  return { skyTexture };
 }
 
 export function setupLights(scene) {
-  const hemi = new THREE.HemisphereLight(0xffaaee, 0x222233, 0.5);
+  const hemi = new THREE.HemisphereLight(0xcfe8ff, 0x6f675a, 0.72);
   scene.add(hemi);
-  const dir = new THREE.DirectionalLight(0xffffff, 1.2);
-  dir.position.set(40, 80, 30);
+  const dir = new THREE.DirectionalLight(0xfff1d0, 2.15);
+  dir.position.set(-55, 105, 45);
   dir.castShadow = true;
   dir.shadow.mapSize.set(2048, 2048);
+  dir.shadow.bias = -0.00008;
+  dir.shadow.normalBias = 0.025;
   dir.shadow.camera.near = 0.5; dir.shadow.camera.far = 400;
   dir.shadow.camera.left = -200; dir.shadow.camera.right = 200;
   dir.shadow.camera.top = 200; dir.shadow.camera.bottom = -200;
   scene.add(dir);
+
+  const fill = new THREE.DirectionalLight(0xa8cfff, 0.28);
+  fill.position.set(50, 38, -70);
+  scene.add(fill);
+
   // Retorna refs pra Game.js poder ajustar shadow camera baseado em bbox da pista.
-  return { hemi, dir };
+  return { hemi, dir, fill };
 }

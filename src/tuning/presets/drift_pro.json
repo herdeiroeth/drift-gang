@@ -1,6 +1,6 @@
 {
   "name": "Drift Pro",
-  "description": "Welded diff, TC off, brake bias 50/50, gear médio, preload alto, sequential gearbox",
+  "description": "Welded, sequential, anti-squat baixo (rear escapa fácil), camber agressivo, RL curto",
   "finalDrive": 3.90,
   "gearRatios": [0, -2.9, 2.95, 1.85, 1.40, 1.10, 0.90, 0.72],
   "differential": { "type": "welded", "preload": 150, "powerLock": 1.0, "coastLock": 1.0 },
@@ -8,5 +8,18 @@
   "brakeBiasFront": 0.50,
   "engineInertia": 0.16,
   "turboMaxBoost": 1.2,
-  "gearboxMode": "sequential"
+  "gearboxMode": "sequential",
+  "tire": {
+    "mu": 1.20,
+    "loadSensN": 0.85,
+    "relaxationLength": 0.20,
+    "tireDriftBias": 0.65
+  },
+  "suspension": {
+    "antiDiveFront": 0.30,
+    "antiSquatRear": 0.10,
+    "camberStaticFront": -0.045,
+    "camberStaticRear": -0.030,
+    "camberGainPerMeter": -0.40
+  }
 }

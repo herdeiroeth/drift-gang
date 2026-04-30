@@ -59,6 +59,11 @@ export class Wheel {
     this.brakeTorque = 0;
 
     this.slipAngle = 0;
+    // Slip angle filtered via relaxation length — assinatura AAA. Pneu real
+    // não desenvolve Fy instantaneamente: precisa rolar ~0.3m de "carcaça
+    // deformação" antes do contato patch achar o ângulo de equilíbrio. Sem
+    // isso, transientes (bumps, steer rápido) geram spikes irreais de Fy.
+    this.slipAngleFiltered = 0;
     this.slipRatio = 0;
     this.normalLoad = 0;
     this.longitudinalForce = 0;
@@ -168,6 +173,23 @@ export class Wheel {
     this._updateDebug();
   }
 
+  syncVisualPose(carPos, carHeading, carPitch, carRoll) {
+    const suspensionOffsetY = this.mesh.position.y - this.anchorWorld.y;
+    this._updateAnchor(carPos, carHeading, carPitch, carRoll);
+    this.mesh.position.set(
+      this.anchorWorld.x,
+      this.anchorWorld.y + suspensionOffsetY,
+      this.anchorWorld.z,
+    );
+    this.ray.ray.origin.copy(this.anchorWorld);
+    this.hitPoint.set(
+      this.anchorWorld.x,
+      this.hasGroundHit ? this.groundY : this.anchorWorld.y - this.rayLen,
+      this.anchorWorld.z,
+    );
+    this._updateDebug();
+  }
+
   applySuspensionLoads(arbForce, geoLoad = 0) {
     this.suspension.applyLoads(arbForce, geoLoad, this.hasGroundHit);
     this._syncSuspensionState();
@@ -207,30 +229,64 @@ export class Wheel {
     const N = this.normalLoad;
 
     // ---- slip angle (lateral)
+    // eps=0.1 m/s evita divisão por zero perto do standstill sem
+    // contaminar slipAngle em arrancada normal (≥0.5 km/h já usa vxAbs).
     const vxAbs = Math.abs(vxLocal);
-    const eps = 0.3;
+    const eps = 0.1;
     this.slipAngle = Math.atan2(vyLocal, Math.max(vxAbs, eps));
     if (this.isFront) {
       this.slipAngle -= Math.sign(vxLocal || 1) * this.steerAngle;
     }
     this.slipAngle = Math.max(-c.maxSlipAngle, Math.min(c.maxSlipAngle, this.slipAngle));
 
-    // ---- slip ratio (longitudinal)
-    const vWheel = this.angularVelocity * c.wheelRadius;
-    if (vxAbs > eps) {
-      this.slipRatio = (vWheel - vxLocal) / Math.max(Math.abs(vxLocal), eps);
+    // Relaxation length: filtra slip angle por low-pass com τ = RL/v_long.
+    // RL = 0.3m é típico de pneus sport street (Pacejka 2.5-3.0 chord lengths).
+    // Em alta velocidade, τ é pequeno → filtro quase passa direto. Em baixa
+    // velocidade, τ é grande → suaviza transientes (steer flicks rápidos não
+    // geram pico de Fy imediato — pneu "respira" antes de pegar). Em
+    // standstill (vxAbs<eps) bypass para evitar τ → ∞.
+    const RL = c.relaxationLength ?? 0.3;
+    if (vxAbs > 0.5) {
+      const tau = RL / vxAbs;
+      const alpha = Math.min(1, dt / tau);  // taxa de convergência
+      this.slipAngleFiltered += (this.slipAngle - this.slipAngleFiltered) * alpha;
     } else {
-      // baixíssima velocidade: amplifica para que clutch-kick consiga gerar slip
-      this.slipRatio = (vWheel - vxLocal) * 2.0;
+      this.slipAngleFiltered = this.slipAngle;
     }
+
+    // ---- slip ratio (longitudinal) — Pacejka padrão.
+    // Definição clássica: κ = (ω·R - vx) / |vx|, com regularização eps no
+    // denominador. A ramp `*2.0` antiga ativava em toda arrancada (eps=0.3
+    // = ~1km/h), amplificava slipRatio fora de calibração, e travava o
+    // Pacejka em clipping. Removida — o sub-step 240Hz cobre a transição
+    // standstill→cruise sem precisar de heurística.
+    const vWheel = this.angularVelocity * c.wheelRadius;
+    this.slipRatio = (vWheel - vxLocal) / Math.max(vxAbs, eps);
     this.slipRatio = Math.max(-1.0, Math.min(1.0, this.slipRatio));
 
     // ---- Pacejka Magic Formula + círculo de fricção (combined slip).
     // Sync params de load sensitivity vivos do cfg (TuningUI muta cfg.loadSensN runtime).
     this.tireParams.loadSensN = c.loadSensN ?? this.tireParams.loadSensN;
     this.tireParams.loadSensRefFz = c.loadSensRefFz ?? this.tireParams.loadSensRefFz;
+
+    // Camber dinâmico = static + gain · (compression - rest_compression).
+    // Em compressão (curva externa), camber fica MAIS negativo (top in)
+    // → Fy boost via camberFactor. Em droop (curva interna), camber positivo
+    // → leve penalty.
+    const camberStatic = this.isFront
+      ? (c.camberStaticFront ?? -0.025)
+      : (c.camberStaticRear  ?? -0.020);
+    const restCompression = this.isFront
+      ? (c.staticSuspCompressionFront ?? 0)
+      : (c.staticSuspCompressionRear ?? 0);
+    const compressionDelta = (this.compression ?? 0) - restCompression;
+    const camberGain = c.camberGainPerMeter ?? -0.30;
+    this.tireParams.camber = camberStatic + camberGain * compressionDelta;
+    // Pacejka recebe slipAngle filtrado (relaxation length); slipRatio puro
+    // (longitudinal não tem RL no modelo simplificado — em real life sim,
+    // mas adicionar abre vetor de bug em arrancada).
     const { Fx: F_long_pacejka, Fy: F_lat } = combinedSlipForces(
-      this.slipAngle,
+      this.slipAngleFiltered,
       this.slipRatio,
       mu,
       N,

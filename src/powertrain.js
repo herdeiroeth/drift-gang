@@ -254,45 +254,50 @@ export class Clutch {
     return this.maxTorqueTransfer * engaged * wearFactor;
   }
 
-  // Torque REAL transmitido ao drivetrain.
-  // Modelo Karnopp friction com tanh smooth: elimina o boolean "stick vs slip"
-  // por uma transição contínua T_friction = T_max · tanh(k·Δω). Quando Δω≈0
-  // o torque transmitido é o do motor (stick); quando Δω cresce, satura em
-  // ±T_max. Isso evita chatter na fronteira stick/slip.
+  // Torque REAL transmitido ao drivetrain (Karnopp friction model puro).
+  //
+  // Em **slip** (|Δω| ≥ stickThreshold): T = sign(Δω) · maxTransfer · |tanh(k·Δω)|.
+  //   O tanh modula a magnitude SEMPRE — não só em casos especiais — gerando a
+  //   curva suave que dá sensação de "engatar progressivo". Sinal sempre na
+  //   direção que reduz Δω (motor mais rápido ⇒ torque flui motor→drivetrain).
+  //   Capamos pelo torque do motor SE motor empurra na mesma direção e produz
+  //   menos que o friction (caso contrário, friction puro sustenta o torque).
+  //
+  // Em **stick** (|Δω| < stickThreshold): clutch lock — passa o torque que o
+  //   motor produz, capado em maxTransfer. O sync ω_engine = ω_drivetrain é
+  //   feito externamente em `PowertrainSystem.updateLocked` (rebatendo a
+  //   velocidade angular do motor para a do drivetrain).
+  //
+  // O transição slip→stick agora é contínua porque tanh(k·0.5) = tanh(2.5) ≈
+  // 0.987 — quase saturado quando entra no stick threshold, evitando notch.
   getTransmittingTorque(engineTorque, deltaOmega = 0) {
     const maxTransfer = this.getMaxTransferableTorque();
-    const k = 5.0;  // smoothness factor (rad/s⁻¹) — Karnopp tanh slope
+    const k = 5.0;
+    const stickThreshold = 0.5;
     const dw = deltaOmega;
-    const tanhFactor = Math.tanh(k * dw);
-    // Capacidade dinâmica do clutch acompanha tanh: |Δω| pequeno → ~0
-    // ⇒ permite stick (passa o engineTorque inteiro). |Δω| grande → ±maxTransfer.
-    const frictionCap = maxTransfer * Math.abs(tanhFactor);
-    // Stick: |Δω| pequeno, frictionCap também é pequeno mas o torque a transmitir
-    // ≤ engineTorque do motor — quando |Δω| < 0.5, "stick" e passa o torque
-    // demandado (limitado pelo cap absoluto).
-    let transmitted;
-    const stickThreshold = 0.5;  // rad/s
     const isStick = Math.abs(dw) < stickThreshold;
+
+    let transmitted;
     if (isStick) {
-      // Stick zone: clutch carrega o que o motor pede, até o teto absoluto.
       const sign = Math.sign(engineTorque) || 1;
       transmitted = sign * Math.min(Math.abs(engineTorque), maxTransfer);
     } else {
-      // Slip zone: torque de fricção dominante, direção dada pelo Δω
-      // (velocidade relativa: motor mais rápido → torque positivo no eixo).
+      const tanhFactor = Math.tanh(k * dw);
+      const frictionMag = maxTransfer * Math.abs(tanhFactor);
       const sign = Math.sign(dw);
-      transmitted = sign * Math.min(maxTransfer, Math.abs(engineTorque) + frictionCap);
-      // Não pode exceder o que o motor realmente produz nessa direção.
-      if (Math.sign(engineTorque) === sign) {
-        transmitted = sign * Math.min(Math.abs(engineTorque), maxTransfer);
-      } else {
-        // engine braking contra o sentido de Δω: cap por friction
-        transmitted = sign * Math.min(maxTransfer * Math.abs(tanhFactor), Math.abs(engineTorque));
+      // Cap por engine torque: se motor empurra na mesma direção do friction
+      // e produz MENOS que o friction max, motor é o limitante. Caso contrário
+      // (motor freando ou motor produzindo mais que friction), o friction
+      // sustenta sozinho — saturado em frictionMag.
+      let mag = frictionMag;
+      if (Math.sign(engineTorque) === sign && Math.abs(engineTorque) < frictionMag) {
+        mag = Math.abs(engineTorque);
       }
+      transmitted = sign * mag;
     }
 
-    // Estado derivado (não mais boolean rígido — apenas heurística pra HUD/wear)
-    this.isSlipping = Math.abs(dw) > stickThreshold;
+    // Estado derivado (HUD/wear — boolean apenas heurístico).
+    this.isSlipping = !isStick;
     if (this.isSlipping) {
       const slipAmt = Math.abs(dw) * Math.abs(transmitted);
       this.temperature += slipAmt * 0.0005;
@@ -443,12 +448,20 @@ export class Gearbox {
     const prev = this.currentGear - 1;
 
     if (!force && prev >= 2) {
-      // Over-rev protection: se o RPM previsto na nova (menor) marcha estourar
-      // o engineMaxRPM, recusa o shift. Margem permite blip + tolerância.
-      const projected = this.projectedRPMInGear(prev, this._lastWheelOmega, this._finalDrive);
-      if (projected > this.engineMaxRPM + this.overrevMarginRPM) {
-        this._flagBlocked('overrev');
-        return false;
+      // Over-rev protection: usa engineRPM ATUAL projetado pra nova ratio.
+      // Antes usava `_lastWheelOmega` (= slowestRearOmega), que em wheelspin
+      // assimétrico ficava em zero → projected=0 → "passa", motor explodia
+      // ao engatar marcha menor. Agora: motor real × ratio_new / ratio_old
+      // = motor RPM no novo gear, garantido sem assumptions de wheel ω.
+      const oldRatio = this.gearRatios[this.currentGear] ?? 0;
+      const newRatio = this.gearRatios[prev] ?? 0;
+      if (Math.abs(oldRatio) > 0.01 && Math.abs(newRatio) > 0.01) {
+        const projectedEngineRPM = this._lastEngineRPM
+          * (Math.abs(newRatio) / Math.abs(oldRatio));
+        if (projectedEngineRPM > this.engineMaxRPM + this.overrevMarginRPM) {
+          this._flagBlocked('overrev');
+          return false;
+        }
       }
     }
 
@@ -493,7 +506,7 @@ export class Gearbox {
   // e injeta o resultado via `_autoShiftCommand` antes de `Gearbox.update`).
   // Esta função cuida só de timers de shift (timer/cooldown) + execução do
   // comando recebido. A lógica de quando subir/descer mora na ECU.
-  update(dt, _engineRPM, _throttleInput, avgRearWheelOmega, finalDrive, _handbrakeInput, _clutchSlipping = false) {
+  update(dt, engineRPM, _throttleInput, avgRearWheelOmega, finalDrive, _handbrakeInput, _clutchSlipping = false) {
     if (this.shiftCooldown > 0) this.shiftCooldown -= dt;
     if (this.lastBlockedTimer > 0) {
       this.lastBlockedTimer -= dt;
@@ -503,6 +516,7 @@ export class Gearbox {
     // Cache para rev-match em downshift e gating de RPM previsto
     this._lastWheelOmega = avgRearWheelOmega;
     this._finalDrive = finalDrive;
+    this._lastEngineRPM = engineRPM ?? 0;  // p/ overrev gating no shiftDown
 
     // Decay do blip de rev-match (sequencial)
     if (this.pendingBlipTimer > 0) {
@@ -591,7 +605,14 @@ export class Gearbox {
 
 const TAN_POWER_ANGLE = Math.tan(45 * Math.PI / 180);   // 1.0
 const TAN_COAST_ANGLE = Math.tan(60 * Math.PI / 180);   // ~1.732
-const WELDED_DAMPING_K = 50000;  // N·m·s/rad — forte, mas estável
+// Baumgarte stabilization constants para welded diff. Em vez do K=50000
+// fixo + clamp 2000 (que causava deadlock em Δω > 0.08 rad/s), agora o
+// damping segue o solver Havok: τ = constante de tempo do constraint
+// (~5ms = 3-5 sub-steps a 1000Hz), I_eff_avg = inércia média no eixo
+// traseiro acoplada ao motor.
+const WELDED_TAU       = 0.005;   // s — converge ω_L = ω_R em ~3·τ = 15ms
+const WELDED_I_EFF_AVG = 2.0;     // kg·m² — estimativa I_wheel + I_engine_reflected
+const WELDED_DAMP_CLAMP = 4000;   // Nm — sanidade (2 pneus mu=1.2 N=5kN R=0.34)
 
 export class Differential {
   constructor(opts = {}) {
@@ -642,21 +663,21 @@ export class Differential {
       return [half, half];
     }
 
-    // ===== WELDED =====
-    // Aplicamos torque base 50/50 + damping fortíssimo que arrasta as duas ω
-    // para a mesma média. Para evitar explosão do integrator, clampamos o
-    // damping ao máximo torque que o pneu consegue reagir (μN·R, estimado ~2000 Nm).
-    // Resultado: ωL ≈ ωR depois de alguns sub-steps; resíduo aceitável.
+    // ===== WELDED — Baumgarte stabilization =====
+    // Constraint kinemático: ω_L = ω_R. Implementado via penalty viscoso
+    // (D·Δω) com D escalado pelo dt do sub-step do powertrain — recipe Havok:
+    //   τ = constante de tempo do constraint (≈ 3-5 sub-steps)
+    //   D = 2·I_eff/τ (criticamente amortecido; sem termo K porque não temos
+    //                   estado angular relativo, só velocidade)
+    // Resultado: ω_L → ω_R em ~3·τ = 15ms, sem o "deadlock" que K fixo + clamp
+    // 2000 Nm causava (ativava em Δω > 0.08 rad/s e travava o transfer).
     if (this.type === 'welded') {
       this.lockAmount = 1.0;
       const omegaDiff = omegaLeft - omegaRight;
-      let dampingTorque = WELDED_DAMPING_K * (omegaDiff * 0.5);
-      // Clamp para o que um pneu consegue absorver realisticamente — evita
-      // explosão numérica quando Δω é alto. ~2000 Nm equivale a μ·N·R com
-      // μ=1, N=6kN, R=0.34m (folgado para SUV; passa a saturar pneu).
-      const DAMP_CLAMP = 2000;
-      if (dampingTorque >  DAMP_CLAMP) dampingTorque =  DAMP_CLAMP;
-      if (dampingTorque < -DAMP_CLAMP) dampingTorque = -DAMP_CLAMP;
+      const D = (2 * WELDED_I_EFF_AVG) / WELDED_TAU;   // ~800 N·m·s/rad
+      let dampingTorque = D * (omegaDiff * 0.5);
+      if (dampingTorque >  WELDED_DAMP_CLAMP) dampingTorque =  WELDED_DAMP_CLAMP;
+      if (dampingTorque < -WELDED_DAMP_CLAMP) dampingTorque = -WELDED_DAMP_CLAMP;
       const baseHalf = totalTorque * 0.5 * this.efficiency;
       return [
         baseHalf - dampingTorque,
@@ -834,11 +855,16 @@ export class Turbocharger {
     this._lastThrottle = 0;
   }
 
-  update(dt, engineRPM, throttleInput) {
+  update(dt, engineRPM, throttleInput, wheelEngagement = 1.0) {
     // Exhaust flow → target boost
-    // Quanto mais alto o rpm e mais aberto o throttle, mais boost
+    // Quanto mais alto o rpm e mais aberto o throttle, mais boost.
+    // wheelEngagement (0..1) atenua o exhaustFlow quando o drivetrain não
+    // está acompanhando o motor (clutch slipping em arrancada): sem essa
+    // atenuação, o turbo spoolava para 0.8 bar em standstill com motor
+    // alto, e na hora que a roda finalmente engatava, vinha pancada de
+    // torque desproporcional (wheelie/instabilidade na arrancada).
     const rpmNorm = Math.min(1.0, engineRPM / 7000);
-    const exhaustFlow = throttleInput * Math.pow(rpmNorm, 1.3);
+    const exhaustFlow = throttleInput * Math.pow(rpmNorm, 1.3) * wheelEngagement;
     const targetBoost = this.maxBoost * exhaustFlow;
 
     // Lag exponencial (turbo é lenta)
@@ -933,6 +959,11 @@ export class ECU {
     this.inhibitUpshiftInDrift = opts.inhibitUpshiftInDrift ?? true;
     this.driftSlipThreshold    = opts.driftSlipThreshold    ?? 0.25;  // rad
 
+    // Rev limit RPM — usado no override "wheelspinHigh em redline" para
+    // permitir upshift mesmo com wheelspin quando o motor não tem onde subir.
+    // PowertrainSystem injeta o valor real do Engine.revLimitRPM.
+    this._revLimitRPM = opts.revLimitRPM ?? 7200;
+
     // Estado interno (s)
     this._upTimer    = 0;
     this._downTimer  = 0;
@@ -958,9 +989,57 @@ export class ECU {
   }
 
   // Avalia uma vez por sub-step. Retorna 'up' | 'down' | null.
-  // ctx: { throttle, drivetrainRPM, currentGear, isShifting, rearSlipAngle, handbrake }
+  // ctx: { throttle, engineRPM, drivetrainRPM, clutchSlipping, currentGear,
+  //         isShifting, rearSlipAngle, handbrake }
   decide(dt, ctx) {
-    const { throttle, drivetrainRPM, currentGear, isShifting, rearSlipAngle, handbrake } = ctx;
+    const {
+      throttle,
+      engineRPM,
+      drivetrainRPM,
+      clutchSlipping,  // mantido p/ debug
+      currentGear,
+      isShifting,
+      rearSlipAngle,
+      rearSlipRatio,   // NOVO: inibe upshift em wheelspin alto
+      handbrake,
+    } = ctx;
+    // Sinais RPM SEPARADOS por direção do shift:
+    //
+    //   - sigUp = engineRPM: motor é o que decide upshift. Em wheelspin
+    //     sustentado, motor sobe a redline, mas o `wheelspinHigh` flag
+    //     inibe upshift falso. Em cruise, engine ≈ drivetrain.
+    //
+    //   - sigDown = drivetrainRPM: drivetrain (= ω_roda real · gear · fd)
+    //     é o que decide downshift. Por que NÃO engineRPM:
+    //       a) Em wheelspin com carro PARADO ou destracionado e WOT, motor
+    //          fica em redline (rev limiter), drivetrain≈0 → downshift
+    //          cascata para 1ª, restaurando força (caso reportado: "perde
+    //          traseira, fica em 6ª sem força pra voltar").
+    //       b) Em coast (engine brake), engine cai junto com drivetrain →
+    //          downshift normal funciona.
+    //       c) Curva onde pneu perde tração: drivetrain cai (roda freia
+    //          contra centrípeta) → ECU desce, motor canta pneu, recupera.
+    //
+    // Antes (sigRPM = engineRPM SEMPRE) o motor em redline em wheelspin
+    // mantinha sig acima do down threshold, ECU nunca descia, carro
+    // travava em alta marcha sem torque.
+    const sigUp = engineRPM ?? 0;
+    const sigDown = drivetrainRPM ?? 0;
+    // Wheelspin alto: rearSlipRatio > 0.5 = roda girando >50% mais rápido que
+    // o esperado pela velocidade. Threshold conservador — slipRatio normal de
+    // arrancada é 0.1-0.3.
+    //
+    // Override de redline: em 1ª-3ª, motor pode estar saturado em redline com
+    // wheelspin (asfalto WOT em arrancada). Sem override, carro trava em
+    // baixa marcha porque upshift fica permanentemente bloqueado.
+    //
+    // Em 4ª+ NÃO há override — wheelspin sustentado em alta marcha indica
+    // que o pneu não dá conta do gear, e upshift agrava (gear ainda mais
+    // alto = menos torque na roda = mais wheelspin saturado = velocidade
+    // CAI). Mantém o motor em peak power band do gear atual.
+    const inRevLimitZone = (engineRPM ?? 0) >= (this._revLimitRPM ?? 7200) * 0.95;
+    const allowRedlineOverride = inRevLimitZone && currentGear <= 4;  // 1ª, 2ª, 3ª
+    const wheelspinHigh = ((rearSlipRatio ?? 0) > 0.5) && !allowRedlineOverride;
 
     // Decai lockout sempre
     if (this._lockoutTimer > 0) this._lockoutTimer = Math.max(0, this._lockoutTimer - dt);
@@ -987,18 +1066,22 @@ export class ECU {
     this.lastUpThreshold = up;
     this.lastDownThreshold = down;
 
-    const sig = drivetrainRPM;
-
-    // -------------- UPSHIFT --------------
-    if (sig > up) {
+    // -------------- UPSHIFT (sigUp = engineRPM) --------------
+    // Inibe se há wheelspin alto: motor decolou além das rodas, subir gear
+    // só piora (motor cai em RPM e roda continua patinando). Aguarda o pneu
+    // engatar antes de upshift. Mantém engine no peak power band.
+    if (sigUp > up) {
       this._upTimer += dt;
       this._downTimer = 0;
       const dwellOK = this._upTimer >= this.upshiftDebounceMs / 1000;
       const driftOK = !(this.inhibitUpshiftInDrift && driftSustained);
+      const spinOK = !wheelspinHigh;
       if (!dwellOK) {
         this.lastInhibitReason = 'debounce';
       } else if (!driftOK) {
         this.lastInhibitReason = 'drift';
+      } else if (!spinOK) {
+        this.lastInhibitReason = 'wheelspin';
       } else {
         this._upTimer = 0;
         this._lastDir = 1;
@@ -1010,11 +1093,23 @@ export class ECU {
       this._upTimer = 0;
     }
 
-    // -------------- KICKDOWN (override do lockout) --------------
+    // -------------- KICKDOWN (sigUp=engineRPM, com lockout) --------------
+    // Player pisa fundo num cruzeiro lento: motor está abaixo do peak,
+    // ECU desce 1 gear pra trazer motor pra zona de torque alta.
+    //
+    // Sinal: usar **engineRPM** (não drivetrainRPM). Em wheelspin com motor
+    // em redline, drivetrainRPM caía abaixo de down·1.3 e tripava kickdown
+    // PARADOXAL — motor já no peak mas ECU descia gear, hunting eterno
+    // 2-3-2-3-2.
+    //
+    // Lockout: respeita `_lockoutTimer` (700ms anti-hunt). Antes, kickdown
+    // ignorava o lockout — logo após upshift 2→3, motor ainda em RPM alto
+    // mas drivetrainRPM caiu pela ratio menor → kickdown trip volta pra 2ª.
     if (
       throttle > this.kickdownThrottle &&
-      sig < down * this.kickdownRPMRatio &&
-      currentGear > 2
+      sigUp < down * this.kickdownRPMRatio &&
+      currentGear > 2 &&
+      this._lockoutTimer <= 0
     ) {
       this._downTimer = 0;
       this._lastDir = -1;
@@ -1023,12 +1118,15 @@ export class ECU {
       return 'down';
     }
 
-    // -------------- DOWNSHIFT --------------
-    if (sig < down && currentGear > 2) {
+    // -------------- DOWNSHIFT (sigDown = drivetrainRPM) --------------
+    // Carro perdendo velocidade ou destracionado: drivetrain cai abaixo do
+    // down threshold, ECU cascata até equilibrar. Em wheelspin com carro
+    // parado, drivetrain≈0 → desce até 1ª, restaurando força.
+    if (sigDown < down && currentGear > 2) {
       this._downTimer += dt;
       this._upTimer = 0;
       const dwellOK = this._downTimer >= this.downshiftDebounceMs / 1000;
-      const lockoutOK = this._lockoutTimer <= 0 || sig < down * 0.85;
+      const lockoutOK = this._lockoutTimer <= 0 || sigDown < down * 0.85;
       if (!dwellOK) {
         this.lastInhibitReason = 'debounce';
       } else if (!lockoutOK) {
@@ -1045,7 +1143,7 @@ export class ECU {
     }
 
     // -------------- HANDBRAKE KICKDOWN (drift) --------------
-    if (handbrake > 0 && sig < 4000 && currentGear > 2 && this._lockoutTimer <= 0) {
+    if (handbrake > 0 && sigDown < 4000 && currentGear > 2 && this._lockoutTimer <= 0) {
       this._lastDir = -1;
       this._lockoutTimer = this.antiHuntLockoutMs / 1000;
       this.lastDecision = 'down';
@@ -1082,6 +1180,8 @@ export class PowertrainSystem {
     this.turbo = opts.turbo ? new Turbocharger(opts.turbo) : null;
     // ECU programável (FuelTech-style). Decide auto-shift via shift map 2D.
     this.ecu = new ECU(opts.ecu);
+    // Injeta o revLimitRPM real do engine pro override de wheelspin em redline.
+    this.ecu._revLimitRPM = this.engine.revLimitRPM ?? this.engine.maxRPM ?? 7200;
 
     // Parâmetros globais
     this.finalDrive = opts.finalDrive ?? 3.8;
@@ -1139,30 +1239,52 @@ export class PowertrainSystem {
     if (shiftUp) this.gearbox.shiftUp();
     if (shiftDown) this.gearbox.shiftDown();
 
-    // 2. Média da velocidade das rodas motrizes (traseiras = RWD)
+    // 2. Velocidades das rodas motrizes (traseiras = RWD).
+    //    avgRearOmega: representa "o que o motor sente via clutch" — é o sig
+    //      correto para ECU (decisão de upshift/downshift/kickdown) E para
+    //      sync do clutch.
+    //    slowestRearOmega: representa "qual roda vai bog primeiro num downshift"
+    //      — usado APENAS no gating overrev/bog do Gearbox (projectedRPMInGear).
+    //      Evita aceitar shift que faria a roda mais lenta dar overrev.
+    //
+    //    Por que separar: usar slowest na ECU dispara kickdown em wheelspin
+    //    sustentado (redline+WOT). drivetrainRPM_slow cai abaixo de down·1.3,
+    //    `throttle>0.92`, `currentGear>2` → kickdown errado em redline.
+    //    Avg "sente a carga real" do motor, evitando esse falso positivo.
     const avgRearOmega = (wRL.angularVelocity + wRR.angularVelocity) * 0.5;
+    const slowestRearOmega = Math.sign(avgRearOmega || 1)
+      * Math.min(Math.abs(wRL.angularVelocity), Math.abs(wRR.angularVelocity));
 
-    // 3. Drivetrain RPM from wheels
+    // 3. Drivetrain RPM from wheels — ECU/clutch usam avg.
     const drivetrainRPM = this.gearbox.getDrivetrainRPM(avgRearOmega, this.finalDrive);
     this.drivetrainOmega = avgRearOmega;
 
-    // 4a. ECU decide auto-shift baseado em shift map 2D + debounce + lockout.
-    //     Sinal usado é SEMPRE drivetrainRPM (RPM virtual da roda) — evita
-    //     o "decolar" do engineRPM em slip e elimina hunting.
-    //     Slip angle do eixo traseiro alimenta a inibição em drift sustentado.
+    // 4a. ECU decide auto-shift.
+    //     - sigRPM = engineRPM SEMPRE (espelha ECU real lendo OBD do motor)
+    //     - rearSlipRatio: usado para inibir UPSHIFT quando há wheelspin alto
+    //       (motor decola além das rodas; subir gear não ajuda — só piora).
+    //     - rearSlipAngle: drift dwell (já existente).
     const rearSlipAngleAvg = ((wRL.slipAngle ?? 0) + (wRR.slipAngle ?? 0)) * 0.5;
+    const rearSlipRatioAvg = (Math.abs(wRL.slipRatio ?? 0) + Math.abs(wRR.slipRatio ?? 0)) * 0.5;
     const ecuCmd = this.ecu.decide(dt, {
       throttle,
+      engineRPM: this.engine.rpm,
       drivetrainRPM,
+      clutchSlipping: this.clutch.isSlipping,
       currentGear: this.gearbox.currentGear,
       isShifting: this.gearbox.isShifting,
       rearSlipAngle: rearSlipAngleAvg,
+      rearSlipRatio: rearSlipRatioAvg,
       handbrake,
     });
     this.gearbox.setAutoShiftCommand(ecuCmd);
 
-    // 4b. Gearbox executa o comando da ECU (se houver) + tica timers.
-    this.gearbox.update(dt, this.engine.rpm, throttle, avgRearOmega, this.finalDrive, handbrake);
+    // 4b. Gearbox executa o comando da ECU + tica timers.
+    //     Gating overrev/bog usa slowestRearOmega: numa proposta de downshift,
+    //     a roda mais lenta projeta o RPM mais conservador → bloqueia shift
+    //     que faria mesmo um lado dar overrev. (`shiftDown` em Gearbox usa
+    //     `_lastWheelOmega` setado aqui, via `projectedRPMInGear`.)
+    this.gearbox.update(dt, this.engine.rpm, throttle, slowestRearOmega, this.finalDrive, handbrake);
 
     // 5. Launch control
     this.launch.update(clutchPedal, throttle, speedMS, this.engine.rpm);
@@ -1175,7 +1297,16 @@ export class PowertrainSystem {
     // do clutch (clutch via só raw, ignorando o pico de boost).
     let turboMult = 1.0;
     if (this.turbo) {
-      this.turbo.update(dt, this.engine.rpm, throttle);
+      // wheelEngagement = quão acoplada a roda está com o motor (0..1).
+      // Em arrancada com clutch slipping, drivetrain ω ≪ engine ω → ratio
+      // baixo → turbo cresce mais devagar. Floor 0.2 garante que turbo
+      // ainda spoola em standstill (não fica completamente apagado).
+      const ptGearRatio = this.gearbox.getGearRatio();
+      const drivetrainSideOmega = avgRearOmega * ptGearRatio * this.finalDrive;
+      const engineOmegaAbs = Math.max(50, Math.abs(this.engine.angularVel));
+      const wheelEngagement = Math.max(0.2,
+        Math.min(1.0, Math.abs(drivetrainSideOmega) / engineOmegaAbs));
+      this.turbo.update(dt, this.engine.rpm, throttle, wheelEngagement);
       turboMult = this.turbo.getTorqueMultiplier();
     }
 
@@ -1270,12 +1401,15 @@ export class PowertrainSystem {
       shiftBlockedReason: this.gearbox.lastBlockedReason,
       shiftBlockedTimer: this.gearbox.lastBlockedTimer,
       gearboxMode: this.gearbox.mode,
-      clutchSlip: this.clutch.isSlipping ? this.clutch.getSlipPercentage(this.engine.rpm, drivetrainRPM) : 0,
+      // Sempre expor slip% — em zero se não há diff de RPM. HUD bar usa
+      // como indicador contínuo, não só on/off.
+      clutchSlip: this.clutch.getSlipPercentage(this.engine.rpm, drivetrainRPM),
       tcActive: this.tc.active,
       tcCut: this.tc.cutLevel,
       launchActive: this.launch.active,
       launchArmed: this.launch.armed,
       boostPsi: this.turbo ? this.turbo.getBoostPSI() : 0,
+      maxBoostPsi: this.turbo ? this.turbo.maxBoost * 14.504 : 0,
       turboSpooling: this.turbo ? this.turbo.isSpooling : false,
       clutchTemp: this.clutch.temperature,
       clutchWear: this.clutch.wear,
