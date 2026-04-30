@@ -10,8 +10,9 @@ export const VISUAL_CFG = {
   // pra procedural se o asset falhar ou rodas não puderem ser extraídas.
   gltfBody: {
     enabled:          true,
-    // Prefer the local optimized GLB when present; fall back to the source asset.
-    url:              ['/models/bmw_m4_f82.opt.glb', '/models/bmw_m4_f82.glb'],
+    // Prefer the full source GLB for close-up paint quality; the optimized
+    // asset is only a lightweight fallback.
+    url:              ['/models/bmw_m4_f82.glb', '/models/bmw_m4_f82.opt.glb'],
     // Comprimento total = wheelBase × scaleFactor. 1.55 ≈ proporção típica
     // de carros esportivos (BMW M4 F82 real: wheelBase 2.81m, length 4.67m → 1.66).
     scaleFactor:      1.66,
@@ -52,9 +53,66 @@ export const VISUAL_CFG = {
     transmission: 0.40,
     thickness:    0.05,
   },
+  mirrors: {
+    enabled:     true,
+    textureWidth: 1024,
+    textureHeight: 512,
+    multisample: 0,
+    anisotropy:  16,
+    updateEvery: 1,
+    fov:         54,
+    near:        0.08,
+    far:         360,
+    flipX:       true,
+    hideCarInReflection: true,
+    cameraEye:   { x: 0.0, y: 1.28, z: -1.15 },
+    cameraLook:  { x: 0.0, y: 1.12, z: -48.0 },
+    // Dois retrovisores externos + um interno. A textura é compartilhada:
+    // uma câmera alta definição por frame em vez de um render extra por mesh.
+    maxActive:   3,
+  },
   spoiler: { color: 0x0a0a0a, roughness: 0.40, metalness: 0.60 },
   headlight: { color: 0xffffcc, emissive: 0xffffaa, intensity: 2.5 },
   taillight: { color: 0xff1111, emissive: 0xff0000, intensity: 1.5 },
+
+  // Sistema de luzes funcionais do GLB. Estados:
+  //   0 = off (tudo desligado, brake ainda funciona)
+  //   1 = DRL + lanterna traseira de posição (farol off)
+  //   2 = farol baixo + lanterna de posição traseira + spotlight low
+  //   3 = farol alto + lanterna de posição traseira + spotlight high
+  //
+  // Tecla F cicla 0→1→2→3→0. Brake light intensifica sobre `position` quando
+  // brake>0.05 (independente do modo, pra brake-light sempre funcionar).
+  lights: {
+    defaultMode: 1,                                  // arranca em DRL (cinema)
+    drl:      { color: 0xfff4d6, intensity: 0.9 },   // headsignal frontal — sempre on em mode≥1
+    low:      { color: 0xfff4d6, intensity: 2.4 },   // lowbeam emissive
+    high:     { color: 0xffffff, intensity: 4.5 },   // highbeam emissive
+    position: { color: 0xff1818, intensity: 0.55 },  // taillight L/R "snake" — on em mode≥1
+    brakeBoost: 2.5,                                 // somado em cima da posição quando brake>0.05
+    // SpotLight real (cone de luz no chão). Só ativo em mode 2/3.
+    spot: {
+      angle: Math.PI / 7,             // ~25.7°
+      penumbra: 0.55,
+      distance: 60,
+      intensityLow:  120,             // physicallyCorrectLights units
+      intensityHigh: 280,
+      castShadow: true,
+      shadowMapSize: 1024,            // menor que sun (4096) — perf
+      shadowBias: -0.0002,
+      // Offset local do farol em relação ao car.mesh (pivot do mesh é o CG).
+      // Z = +frente do carro. Y/X = altura/lateral. Valores afinados pra
+      // BMW M4 F82 escala atual; ajustar se mudar `scaleFactor`.
+      mountY: 0.55,
+      mountZHint: 1.55,                // tentativa de frente; sobrescrito pelo headlight mesh world pos
+      // Direção do feixe: low aponta levemente pra baixo, high mais alto.
+      targetForwardZ: 12.0,            // m à frente
+      targetLowY:  -1.0,               // alvo abaixo do farol (low aponta pro asfalto perto)
+      targetHighY: -0.55,              // high beam: aponta menos pra baixo que low, mas
+                                       // ainda ilumina o asfalto (era -0.15 = quase reto,
+                                       // perdia o feixe próximo do carro).
+    },
+  },
 
   tire: {
     color:        0x0c0c0c,

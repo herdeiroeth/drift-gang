@@ -14,7 +14,7 @@ import { LapSystem } from '../track/LapSystem.js';
 import { loadLapStats, saveLapStats } from '../track/lapStorage.js';
 import { loadTrackData } from '../track/trackStorage.js';
 import { LapSoundFX } from '../audio/LapSoundFX.js';
-import { TRACK_CFG } from './constants.js';
+import { TRACK_CFG, RENDER_CFG } from './constants.js';
 import { TuningUI } from '../tuning/TuningUI.js';
 import { TrackEditor } from '../editor/TrackEditor.js';
 import { Telemetry } from '../ui/Telemetry.js';
@@ -53,14 +53,21 @@ export class Game {
   constructor(opts = {}) {
     this.opts = opts;
     this.canvas = document.getElementById('game-canvas');
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+    this.renderer = new THREE.WebGLRenderer({
+      canvas: this.canvas,
+      antialias: true,
+      powerPreference: 'high-performance',
+      precision: 'highp',
+    });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, RENDER_CFG.pixelRatioMax));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.04;
+    this.renderer.toneMappingExposure = RENDER_CFG.toneMappingExposure;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = RENDER_CFG.shadowType === 'PCFSoft'
+      ? THREE.PCFSoftShadowMap
+      : THREE.PCFShadowMap;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 600);
@@ -69,7 +76,7 @@ export class Game {
     this.smoke = new SmokeSystem(this.scene);
     this.skids = new SkidSystem(this.scene);
 
-    setupEnv(this.scene);
+    setupEnv(this.scene, this.renderer);
     this.lights = setupLights(this.scene);
 
     if (USE_TRACK) {
@@ -129,7 +136,7 @@ export class Game {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(window.innerWidth, window.innerHeight);
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, RENDER_CFG.pixelRatioMax));
     });
   }
 
@@ -198,6 +205,11 @@ export class Game {
     if (this.lapHud) this.lapHud.show();
   }
 
+  _renderScene() {
+    this.car?.visuals?.renderMirrorReflections(this.renderer, this.scene);
+    this.renderer.render(this.scene, this.camera);
+  }
+
   _openEditor() {
     if (!this.track || !this.trackEditor) return;
     this._stateBeforeEditor = this.state;
@@ -215,7 +227,7 @@ export class Game {
 
       if (this.state === 'start') {
         this.camCtrl.update(dt, { car: this.car, telem: { speed: 0 } });
-        this.renderer.render(this.scene, this.camera);
+        this._renderScene();
         if (this.input.once('Space')) this.start();
         if (this.input.once('KeyM')) this._openEditor();
         this.input.clear();
@@ -229,7 +241,7 @@ export class Game {
           this.state = this._stateBeforeEditor || 'playing';
           this._stateBeforeEditor = null;
         }
-        this.renderer.render(this.scene, this.camera);
+        this._renderScene();
         this.input.clear();
         return;
       }
@@ -247,6 +259,11 @@ export class Game {
       if (this.input.once('KeyV')) this.cameraStudio.toggle();
       if (this.input.once('KeyH')) this.telemetry.toggle();
       if (this.input.once('KeyM')) this._openEditor();
+      // F cicla farol: 0=off → 1=DRL → 2=baixo → 3=alto → 0
+      if (this.input.once('KeyF')) {
+        const v = this.car?.visuals;
+        if (v?.glb) v.glb.lightsMode = (v.glb.lightsMode + 1) % 4;
+      }
       this.tuning.update();
       this.cameraStudio.update();
 
@@ -302,7 +319,7 @@ export class Game {
 
       this.camCtrl.update(dt, { car: this.car, telem });
       this.hud.update(telem, dt, this.state === 'playing');
-      this.renderer.render(this.scene, this.camera);
+      this._renderScene();
       this.input.clear();
     } catch (e) {
       console.error('GAME LOOP CRASH:', e.message, e.stack);

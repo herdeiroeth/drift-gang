@@ -74,6 +74,35 @@ export const SURFACE_MU = {
   grass:   0.38,
 };
 
+// Render quality knobs. Defaults agressivos — assumem hardware moderno
+// (GPU dedicada). Para downgrade, basta editar aqui — Game.js e Environment.js
+// leem daqui em vez de magic numbers.
+export const RENDER_CFG = {
+  // Cap de devicePixelRatio. 2.0 dobra fillrate em retinas (1.5×→4×) mas
+  // continua razoável; passar de 2 começa a custar caro em 4K/5K sem ganho
+  // visível pelo screen DPI dos monitores de jogo típicos.
+  pixelRatioMax: 2.0,
+  // Sombra direcional (sol). 4096² = 16MP de shadow buffer; com PCF +
+  // ortho ajustado ao bbox da pista, sombra fica sub-decimétrica em pista
+  // de 600m.
+  shadowMapSize: 4096,
+  // PCFSoftShadowMap foi deprecado no Three atual; PCF com shadow map grande
+  // evita warning e mantém bordas limpas o bastante para a pista.
+  shadowType: 'PCF',
+  shadowBias: -0.00005,
+  shadowNormalBias: 0.04,
+  // Tone mapping exposure — afeta brilho geral. ACESFilmic + 1.04 = leve
+  // overexposure cinematic.
+  toneMappingExposure: 1.04,
+  // envMapIntensity para pintura do carro (clearcoat). 2.35 com PMREM real
+  // do skyTexture dá reflexo de verniz bem legível em close-up.
+  envMapIntensityPaint: 2.35,
+  // Anisotropy mínimo aplicado a TODAS as texturas do GLB. GPU clampa
+  // automaticamente ao seu max (geralmente 16). Texturas do carro vistas
+  // de perspectiva (capô, lateral) ficam crisp.
+  textureAnisotropy: 16,
+};
+
 // Configuração de geração de pistas (TrackBuilder/TrackGeometry).
 export const TRACK_CFG = {
   // Resolução de amostragem da spline. 0.5 = 1 sample a cada 2m.

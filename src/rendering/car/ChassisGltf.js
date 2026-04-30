@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RENDER_CFG } from '../../core/constants.js';
 
 // Substitui o `buildChassis()` procedural quando há um modelo glTF carregado.
 // Recebe o `gltfScene` (já clonado pelo CarModelLoader), calcula scale +
@@ -56,7 +57,12 @@ export function buildChassisFromGltf(parent, gltfScene, ctx) {
     node.castShadow = true;
     node.receiveShadow = true;
     if (enhanceMaterials && node.material) {
-      node.material = enhanceMaterial(node.material, applyClearcoat, materialCache);
+      node.material = enhanceMaterial(
+        node.material,
+        applyClearcoat,
+        materialCache,
+        getMaterialContextName(node),
+      );
     }
   });
 
@@ -77,26 +83,46 @@ export function buildChassisFromGltf(parent, gltfScene, ctx) {
 //
 // Se o material já é MeshPhysicalMaterial, mexe direto. Se for MeshStandardMaterial,
 // adiciona props compatíveis (ambos derivam do mesmo shader).
-function enhanceMaterial(mat, applyClearcoat, cache) {
-  if (Array.isArray(mat)) return mat.map(m => enhanceSingleMaterial(m, applyClearcoat, cache));
-  return enhanceSingleMaterial(mat, applyClearcoat, cache);
+function getMaterialContextName(node) {
+  return [
+    node.name,
+    node.geometry?.name,
+    node.parent?.name,
+  ].filter(Boolean).join(' ');
 }
 
-function enhanceSingleMaterial(mat, applyClearcoat, cache) {
+function enhanceMaterial(mat, applyClearcoat, cache, contextName = '') {
+  if (Array.isArray(mat)) {
+    return mat.map(m => enhanceSingleMaterial(m, applyClearcoat, cache, contextName));
+  }
+  return enhanceSingleMaterial(mat, applyClearcoat, cache, contextName);
+}
+
+function enhanceSingleMaterial(mat, applyClearcoat, cache, contextName = '') {
   if (!mat) return mat;
-  if (cache.has(mat)) return cache.get(mat);
 
   let m = mat;
   const name = (m.name || '').toLowerCase();
+  const context = contextName.toLowerCase();
+  const isExteriorPaint = isAutomotivePaint(name, context);
+  const cacheKey = isExteriorPaint ? 'paint' : 'default';
+  let perMaterial = cache.get(mat);
+  if (perMaterial?.has(cacheKey)) return perMaterial.get(cacheKey);
+  if (!perMaterial) {
+    perMaterial = new Map();
+    cache.set(mat, perMaterial);
+  }
+
   const isGlass = name.includes('glass') || name.includes('window') || name.includes('windshield');
   const isLight = name.includes('headlight') || name.includes('headlamp')
     || name.includes('front_light') || name.includes('taillight') || name.includes('tail_light')
-    || name.includes('headsignal');
+    || name.includes('headsignal') || name.includes('lowbeam') || name.includes('highbeam')
+    || name.includes('runninglight') || name.includes('chmsl');
   const isRubber = name.includes('tire') || name.includes('tyre') || name.includes('rubber');
   const isMetalTrim = name.includes('chrome') || name.includes('rim') || name.includes('wheel')
     || name.includes('brake') || name.includes('disc') || name.includes('caliper');
   const isPaint = name.includes('paint') || name.includes('body') || name.includes('car_body')
-    || name.includes('exterior') || name.includes('chassis');
+    || name.includes('exterior') || name.includes('chassis') || isExteriorPaint;
 
   prepareMaterialTextures(m);
 
@@ -112,38 +138,52 @@ function enhanceSingleMaterial(mat, applyClearcoat, cache) {
     m.thickness = 0;
     m.envMapIntensity = Math.max(m.envMapIntensity ?? 1, 1.25);
   } else if (applyClearcoat && isPaint && !isMetalTrim && !isLight) {
-    m = toPhysicalMaterial(m);
-    m.roughness = Math.max(0.18, Math.min(m.roughness ?? 0.35, 0.42));
-    m.metalness = Math.max(m.metalness ?? 0, 0.12);
-    m.clearcoat = Math.max(m.clearcoat ?? 0, 0.78);
-    m.clearcoatRoughness = Math.min(m.clearcoatRoughness ?? 0.16, 0.2);
-    m.envMapIntensity = Math.max(m.envMapIntensity ?? 1, 1.35);
+    // `ARm4_main` é compartilhado por carroceria, interior e enginebay. Clone
+    // apenas a variante externa para o verniz não contaminar outras peças.
+    m = toPhysicalMaterial(m, { clone: isExteriorPaint });
+    m.roughness = 0.22;
+    m.metalness = Math.max(m.metalness ?? 0, 0.28);
+    m.clearcoat = 1.0;
+    m.clearcoatRoughness = 0.035;
+    m.envMapIntensity = Math.max(m.envMapIntensity ?? 1, RENDER_CFG.envMapIntensityPaint);
   } else if (isRubber) {
     m.roughness = Math.max(m.roughness ?? 0.85, 0.9);
     m.metalness = Math.min(m.metalness ?? 0.02, 0.02);
     if (m.envMapIntensity != null) m.envMapIntensity = Math.min(m.envMapIntensity, 0.65);
   } else if (isMetalTrim) {
-    m.roughness = Math.min(m.roughness ?? 0.32, 0.42);
-    m.metalness = Math.max(m.metalness ?? 0.65, 0.7);
-    if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.15);
+    m.roughness = Math.min(m.roughness ?? 0.28, 0.32);
+    m.metalness = Math.max(m.metalness ?? 0.85, 0.85);
+    if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.4);
   }
 
-  if (name.includes('headlight') || name.includes('headlamp') || name.includes('headsignal')) {
-    m.emissive = new THREE.Color(0xfff4d6);
-    m.emissiveIntensity = Math.max(m.emissiveIntensity ?? 0, 0.45);
-  }
-  if (name.includes('tail') && (name.includes('light') || name.includes('lamp'))) {
-    m.emissive = new THREE.Color(0xff1818);
-    m.emissiveIntensity = Math.max(m.emissiveIntensity ?? 0, 0.38);
+  // Emissive de faróis/lanternas é controlado em runtime por CarVisuals
+  // (`_setupLights` + `_updateLights`). Aqui só garantimos que materiais de
+  // luz comecem zerados pra não residual brilhar quando o sistema setar mode=0.
+  if (isLight) {
+    m.emissiveIntensity = 0;
   }
 
   if (m.envMapIntensity != null) m.envMapIntensity = Math.max(m.envMapIntensity, 1.0);
-  cache.set(mat, m);
+  perMaterial.set(cacheKey, m);
   return m;
 }
 
-function toPhysicalMaterial(mat) {
-  if (mat.isMeshPhysicalMaterial) return mat;
+function isAutomotivePaint(materialName, contextName) {
+  if (materialName !== 'arm4_main') return false;
+  if (/(interior|enginebay|engine|underbody|headlight|taillight|trunklight|glass|wheel|brake|diffuser|grille|mirror|badge|logo)/.test(contextName)) {
+    return false;
+  }
+  return /(body|door_[lr]|fender_[lr]|dender_trim|hood|bumper_[fr]|trunk|skirt)/.test(contextName);
+}
+
+function toPhysicalMaterial(mat, { clone = false } = {}) {
+  if (mat.isMeshPhysicalMaterial) {
+    if (!clone) return mat;
+    const physical = mat.clone();
+    physical.name = mat.name;
+    physical.userData = { ...mat.userData };
+    return physical;
+  }
   const physical = new THREE.MeshPhysicalMaterial();
   THREE.MeshStandardMaterial.prototype.copy.call(physical, mat);
   physical.name = mat.name;
@@ -163,15 +203,27 @@ function prepareMaterialTextures(mat) {
     'clearcoatRoughnessMap',
     'clearcoatNormalMap',
   ];
+  // Cap 16 — três.js/GPU clampam silenciosamente ao maxAnisotropy suportado
+  // (que na maioria das GPUs modernas é 16). Sem cap, texturas oblíquas
+  // (capô em perspectiva, asfalto em distância) ficam moiré/borradas.
+  const aniso = RENDER_CFG.textureAnisotropy;
   for (const key of colorMaps) {
     const tex = mat[key];
     if (!tex) continue;
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = Math.max(tex.anisotropy ?? 1, 4);
+    tex.anisotropy = Math.max(tex.anisotropy ?? 1, aniso);
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = true;
+    tex.needsUpdate = true;
   }
   for (const key of linearMaps) {
     const tex = mat[key];
     if (!tex) continue;
-    tex.anisotropy = Math.max(tex.anisotropy ?? 1, 4);
+    tex.anisotropy = Math.max(tex.anisotropy ?? 1, aniso);
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = true;
+    tex.needsUpdate = true;
   }
 }
