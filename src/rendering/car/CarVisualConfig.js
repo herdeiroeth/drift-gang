@@ -10,8 +10,10 @@ export const VISUAL_CFG = {
   // pra procedural se o asset falhar ou rodas não puderem ser extraídas.
   gltfBody: {
     enabled:          true,
-    // Prefer the local optimized GLB when present; fall back to the source asset.
-    url:              ['/models/bmw_m4_f82.opt.glb', '/models/bmw_m4_f82.glb'],
+    // Quality-first: use the source GLB by default. The optimized GLB remains
+    // as fallback for weaker machines, but it intentionally reduces texture
+    // and mesh detail.
+    url:              ['/models/bmw_m4_f82.glb', '/models/bmw_m4_f82.opt.glb'],
     // Comprimento total = wheelBase × scaleFactor. 1.55 ≈ proporção típica
     // de carros esportivos (BMW M4 F82 real: wheelBase 2.81m, length 4.67m → 1.66).
     scaleFactor:      1.66,

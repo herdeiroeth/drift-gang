@@ -7,7 +7,92 @@ import { buildSwayBar, HalfShaft } from './parts/Axle.js';
 import { SuspensionLinkage } from './parts/SuspensionLinkage.js';
 import { extractAndReparentWheels, measureWheelLayoutFromGltf } from './loaders/extractWheels.js';
 import { inspectGltf, isDebugEnabled } from './loaders/inspectGltf.js';
+import {
+  ensureCarLightMaterial,
+  getCarLightBaseIntensity,
+  resolveCarLightRole,
+} from './loaders/lightMaterials.js';
 import { VISUAL_CFG } from './CarVisualConfig.js';
+
+const LIGHT_MODE_ORDER = ['drl', 'low', 'high', 'off'];
+const LIGHT_MODE_LABELS = {
+  drl:  'DRL',
+  low:  'LOW',
+  high: 'HIGH',
+  off:  'OFF',
+};
+
+const LIGHT_MODE_MULTIPLIERS = {
+  off: {
+    runningLight: 0,
+    lowBeam: 0,
+    highBeam: 0,
+    frontSignal: 0,
+    sideSignal: 0,
+    tailLight: 0,
+    rearSignal: 0,
+    reverseLight: 0,
+    brakeLight: 0,
+  },
+  drl: {
+    runningLight: 1.0,
+    lowBeam: 0,
+    highBeam: 0,
+    frontSignal: 0,
+    sideSignal: 0,
+    tailLight: 0,
+    rearSignal: 0,
+    reverseLight: 0,
+    brakeLight: 0,
+  },
+  low: {
+    runningLight: 0.82,
+    lowBeam: 1.0,
+    highBeam: 0,
+    frontSignal: 0,
+    sideSignal: 0,
+    tailLight: 0.72,
+    rearSignal: 0,
+    reverseLight: 0,
+    brakeLight: 0,
+  },
+  high: {
+    runningLight: 0.72,
+    lowBeam: 0.75,
+    highBeam: 1.35,
+    frontSignal: 0,
+    sideSignal: 0,
+    tailLight: 0.78,
+    rearSignal: 0,
+    reverseLight: 0,
+    brakeLight: 0,
+  },
+};
+
+const LIGHT_SHOW_STEP_SECONDS = 0.155;
+const LIGHT_SHOW_PATTERN = [
+  { runningLight: { left: 1.8 } },
+  { runningLight: { right: 1.8 } },
+  { lowBeam: { left: 1.45 } },
+  { lowBeam: { right: 1.45 } },
+  { highBeam: { left: 1.25 } },
+  { highBeam: { right: 1.25 } },
+  { frontSignal: { left: 2.6 }, rearSignal: { left: 2.8 } },
+  { frontSignal: { right: 2.6 }, rearSignal: { right: 2.8 } },
+  { tailLight: { center: 1.75 } },
+  { tailLight: { left: 2.1 } },
+  { tailLight: { right: 2.1 } },
+  { rearSignal: { center: 2.3 }, reverseLight: { center: 1.55 } },
+  { brakeLight: { center: 1.9 }, tailLight: { center: 1.0, left: 0.8, right: 0.8 } },
+  { reverseLight: { center: 1.7 }, highBeam: { left: 0.75, right: 0.75 } },
+  {
+    runningLight: { left: 1.25, right: 1.25 },
+    lowBeam:      { left: 0.75, right: 0.75 },
+    tailLight:    { center: 1.2, left: 1.2, right: 1.2 },
+  },
+  { frontSignal: { left: 3.0, right: 3.0 }, rearSignal: { left: 3.2, right: 3.2, center: 2.5 } },
+  {},
+];
 
 // Orquestrador visual do carro.
 //
@@ -37,6 +122,10 @@ export class CarVisuals {
     this.wheelAssemblies = null;
     this.halfShafts = [];
     this.linkages = [];
+    this.lightMode = 'drl';
+    this.lightShowActive = false;
+    this.lightShowTime = 0;
+    this.lightShowStepIndex = -1;
 
     if (useGltf) {
       const gltfScene = opts.gltfScene;
@@ -110,6 +199,7 @@ export class CarVisuals {
 
   update(dt) {
     const car = this.car;
+    if (this.lightShowActive) this.lightShowTime += dt;
 
     // Pose das rodas: posição já é setada por Wheel.js (hit-point);
     // aqui setamos rotação composta com pitch + heading + steer + roll.
@@ -144,6 +234,51 @@ export class CarVisuals {
     for (const lk of this.linkages) lk.update();
 
     this._updateGlbRigging();
+  }
+
+  cycleLightMode() {
+    if (this.lightShowActive) this.setLightShow(false, { apply: false, silent: true });
+    const idx = LIGHT_MODE_ORDER.indexOf(this.lightMode);
+    const next = LIGHT_MODE_ORDER[(idx + 1 + LIGHT_MODE_ORDER.length) % LIGHT_MODE_ORDER.length];
+    this.setLightMode(next);
+    return this.lightMode;
+  }
+
+  setLightMode(mode) {
+    if (!LIGHT_MODE_MULTIPLIERS[mode]) return this.lightMode;
+    if (this.lightShowActive) this.setLightShow(false, { apply: false, silent: true });
+    this.lightMode = mode;
+    this.car.lightMode = mode;
+    this._applyGlbLightMode();
+    if (isDebugEnabled('parts')) {
+      console.log(`[CarVisuals] light mode -> ${this.getLightModeLabel()}`);
+    }
+    return this.lightMode;
+  }
+
+  toggleLightShow() {
+    return this.setLightShow(!this.lightShowActive);
+  }
+
+  setLightShow(active, opts = {}) {
+    const enabled = !!active;
+    const changed = this.lightShowActive !== enabled;
+    this.lightShowActive = enabled;
+    this.car.lightShowActive = enabled;
+    if (enabled && changed) {
+      this.lightShowTime = 0;
+      this.lightShowStepIndex = -1;
+    }
+    if (opts.apply !== false) this._applyGlbLightMode();
+    if (!opts.silent && isDebugEnabled('parts')) {
+      console.log(`[CarVisuals] light show -> ${enabled ? 'ON' : 'OFF'}`);
+    }
+    return this.lightShowActive;
+  }
+
+  getLightModeLabel() {
+    if (this.lightShowActive) return 'LIGHT SHOW';
+    return LIGHT_MODE_LABELS[this.lightMode] ?? this.lightMode.toUpperCase();
   }
 
   // ---------------------------------------------------------------
@@ -199,38 +334,48 @@ export class CarVisuals {
     this.glb._baseRotSpeedo     = snapRot(this.glb.needleSpeedo);
     this._restoreFrozenGlbMechanicals();
 
-    // Brake/headlight materials — cache valores ORIGINAIS de emissive e
-    // intensity. O setup anterior sobrescrevia, apagando a luz constante
-    // (DRL/lente vermelha de brake estável) — em update vamos só MODULAR
-    // sobre o original, nunca sobrescrever.
+    // Brake/headlight materials — o GLB tem materiais dedicados (lowbeam,
+    // runninglight, taillight_alt, chmsl etc). Primeiro garantimos emissive
+    // visivel nesses nomes e depois cacheamos a intensidade base para modular
+    // freio sem apagar DRL/lanternas constantes.
     this.glb.brakeLightMats = [];
     this.glb.headlightMats = [];
+    this.glb.lightMats = [];
+    this.glb.runtimeLights = null;
+    this.car.mesh.updateMatrixWorld(true);
+    gltfRoot.updateMatrixWorld(true);
     gltfRoot.traverse((o) => {
       if (!o.isMesh || !o.material) return;
       const mats = Array.isArray(o.material) ? o.material : [o.material];
-      for (const m of mats) {
-        const n = m.name ?? '';
-        if (n.includes('taillight_alt') || n.includes('chmsl')) {
-          // Pula materiais já cadastrados (mesh pode estar duplicada na cena)
-          if (m.userData.__brakeBase != null) {
-            this.glb.brakeLightMats.push(m);
-            continue;
-          }
-          m.userData.__brakeBase = m.emissiveIntensity ?? 0;
-          m.userData.__brakeColor = m.emissive ? m.emissive.clone() : null;
-          this.glb.brakeLightMats.push(m);
+      let clonedAny = false;
+      const nextMats = mats.map((m) => {
+        const role = resolveCarLightRole(m.name, o.name);
+        if (!role) return m;
+
+        const lightMaterial = m.clone();
+        lightMaterial.name = m.name;
+        lightMaterial.userData = { ...(m.userData ?? {}) };
+        ensureCarLightMaterial(lightMaterial, role);
+
+        const localCenter = getObjectCenterInParent(o, this.car.mesh);
+        const side = getLightSide(o.name, localCenter?.x ?? 0);
+        const baseIntensity = Math.max(lightMaterial.emissiveIntensity ?? 0, getCarLightBaseIntensity(role));
+        lightMaterial.userData.__lightRole = role;
+        lightMaterial.userData.__lightBaseIntensity = baseIntensity;
+        lightMaterial.userData.__lightSide = side;
+        lightMaterial.userData.__lightColor = lightMaterial.emissive ? lightMaterial.emissive.clone() : null;
+        this.glb.lightMats.push({ material: lightMaterial, role, baseIntensity, side, meshName: o.name });
+        if (role === 'tailLight' || role === 'brakeLight') this.glb.brakeLightMats.push(lightMaterial);
+        if (role === 'lowBeam' || role === 'highBeam' || role === 'runningLight' || role === 'frontSignal') {
+          this.glb.headlightMats.push(lightMaterial);
         }
-        if (n.includes('lowbeam') || n.includes('highbeam') || n.includes('runninglight')) {
-          if (m.userData.__hlBase != null) {
-            this.glb.headlightMats.push(m);
-            continue;
-          }
-          m.userData.__hlBase = m.emissiveIntensity ?? 0;
-          m.userData.__hlColor = m.emissive ? m.emissive.clone() : null;
-          this.glb.headlightMats.push(m);
-        }
-      }
+        clonedAny = true;
+        return lightMaterial;
+      });
+      if (clonedAny) o.material = Array.isArray(o.material) ? nextMats : nextMats[0];
     });
+    this._setupRuntimeLightEmitters(gltfRoot);
+    this._applyGlbLightMode();
 
     if (isDebugEnabled('parts')) {
       console.log('[CarVisuals] GLB rigging refs:', Object.fromEntries(
@@ -238,7 +383,90 @@ export class CarVisuals {
               .map(([k, v]) => [k, v.name]),
       ));
       console.log(`[CarVisuals] brake mats: ${this.glb.brakeLightMats.length}, headlight mats: ${this.glb.headlightMats.length}`);
+      console.log(`[CarVisuals] light mode: ${this.getLightModeLabel()}, light mats: ${this.glb.lightMats.length}`);
+      console.log(`[CarVisuals] light roles: ${summarizeLightRoles(this.glb.lightMats)}`);
     }
+  }
+
+  _setupRuntimeLightEmitters(gltfRoot) {
+    const carRoot = this.car.mesh;
+    carRoot.updateMatrixWorld(true);
+    gltfRoot.updateMatrixWorld(true);
+
+    const fallbackFront = [
+      new THREE.Vector3(-0.56, 0.38, this.car.cfg.cgToFrontAxle + 0.72),
+      new THREE.Vector3( 0.56, 0.38, this.car.cfg.cgToFrontAxle + 0.72),
+    ];
+    const fallbackRear = [
+      new THREE.Vector3(-0.62, 0.42, -this.car.cfg.cgToRearAxle - 0.62),
+      new THREE.Vector3( 0.62, 0.42, -this.car.cfg.cgToRearAxle - 0.62),
+    ];
+
+    const frontNodes = [
+      gltfRoot.getObjectByName('ARm4_headlight_L_black'),
+      gltfRoot.getObjectByName('ARm4_headlight_R_black'),
+    ];
+    const rearNodes = [
+      gltfRoot.getObjectByName('ARm4_taillight_L_snake.001'),
+      gltfRoot.getObjectByName('ARm4_taillight_R_snake.001'),
+    ];
+
+    const frontCenters = frontNodes.map((node, i) => getObjectCenterInParent(node, carRoot) ?? fallbackFront[i]);
+    const rearCenters = rearNodes.map((node, i) => getObjectCenterInParent(node, carRoot) ?? fallbackRear[i]);
+
+    const lowSpots = [];
+    const highSpots = [];
+    const frontSignalPoints = [];
+    for (let i = 0; i < frontCenters.length; i++) {
+      const center = frontCenters[i];
+      const side = getLightSide(frontNodes[i]?.name, center.x);
+      const low = new THREE.SpotLight(0xfff1d2, 0, 32, 0.33, 0.62, 1.2);
+      const high = new THREE.SpotLight(0xfff7e8, 0, 54, 0.23, 0.48, 1.0);
+      const signal = new THREE.PointLight(0xffa23a, 0, 3.2, 1.8);
+      const lowTarget = new THREE.Object3D();
+      const highTarget = new THREE.Object3D();
+
+      low.position.copy(center);
+      high.position.copy(center).add(new THREE.Vector3(0, 0.02, 0.03));
+      signal.position.copy(center).add(new THREE.Vector3(0, 0.02, 0));
+      lowTarget.position.copy(center).add(new THREE.Vector3(0, -0.28, 10));
+      highTarget.position.copy(center).add(new THREE.Vector3(0, -0.08, 18));
+      low.target = lowTarget;
+      high.target = highTarget;
+      low.userData.lightSide = side;
+      high.userData.lightSide = side;
+      signal.userData.lightSide = side;
+
+      low.castShadow = false;
+      high.castShadow = false;
+      carRoot.add(low, lowTarget, high, highTarget, signal);
+      lowSpots.push(low);
+      highSpots.push(high);
+      frontSignalPoints.push(signal);
+    }
+
+    const tailPoints = [];
+    const brakePoints = [];
+    const rearSignalPoints = [];
+    for (let i = 0; i < rearCenters.length; i++) {
+      const center = rearCenters[i];
+      const side = getLightSide(rearNodes[i]?.name, center.x);
+      const tail = new THREE.PointLight(0xff1818, 0, 5.5, 1.9);
+      const brake = new THREE.PointLight(0xff1414, 0, 7.0, 1.7);
+      const signal = new THREE.PointLight(0xff4a24, 0, 4.4, 1.8);
+      tail.position.copy(center).add(new THREE.Vector3(0, 0, -0.08));
+      brake.position.copy(center).add(new THREE.Vector3(0, 0.02, -0.12));
+      signal.position.copy(center).add(new THREE.Vector3(0, 0.01, -0.1));
+      tail.userData.lightSide = side;
+      brake.userData.lightSide = side;
+      signal.userData.lightSide = side;
+      carRoot.add(tail, brake, signal);
+      tailPoints.push(tail);
+      brakePoints.push(brake);
+      rearSignalPoints.push(signal);
+    }
+
+    this.glb.runtimeLights = { lowSpots, highSpots, frontSignalPoints, tailPoints, brakePoints, rearSignalPoints };
   }
 
   _updateGlbRigging() {
@@ -289,15 +517,69 @@ export class CarVisuals {
       G.needleSpeedo.rotation.z = G._baseRotSpeedo.z + (-norm * 4.4);
     }
 
-    // Brake lights: modula sobre o emissive ORIGINAL. brake=on → +1.5 sobre
-    // a base; brake=off → mantém base (preservando DRL constante).
-    const brake = (car.brake ?? 0);
-    const brakeBoost = brake > 0.05 ? 1.5 : 0.0;
-    for (const m of G.brakeLightMats) {
-      if (m.emissiveIntensity == null) continue;
-      const base = m.userData.__brakeBase ?? 0;
-      m.emissiveIntensity = base + brakeBoost;
+    this._applyGlbLightMode();
+  }
+
+  _applyGlbLightMode() {
+    if (!this.glb?.lightMats) return;
+
+    const car = this.car;
+    const showActive = this.lightShowActive;
+    const showStep = showActive ? this._getLightShowStep() : null;
+    const mode = LIGHT_MODE_MULTIPLIERS[this.lightMode] ? this.lightMode : 'drl';
+    const levels = LIGHT_MODE_MULTIPLIERS[mode];
+    const brake = (car.brake ?? 0) > 0.05;
+    const reverse = car.powertrain?.gearbox?.currentGear === 1;
+
+    for (const entry of this.glb.lightMats) {
+      const { material: m, role, baseIntensity, side } = entry;
+      if (!m) continue;
+
+      const level = showActive ? getLightShowLevel(showStep, role, side) : (levels[role] ?? 0);
+      const effectiveBase = role === 'brakeLight' ? Math.max(baseIntensity, 2.2) : baseIntensity;
+      let intensity = effectiveBase * level;
+      if (!showActive) {
+        if (role === 'tailLight' && brake) intensity += Math.max(1.45, baseIntensity * 1.55);
+        if (role === 'brakeLight' && brake) intensity += Math.max(2.2, baseIntensity * 2.5);
+        if (role === 'reverseLight' && reverse) intensity = Math.max(intensity, baseIntensity);
+      }
+
+      m.emissiveIntensity = intensity;
+      m.needsUpdate = true;
     }
+
+    const emitters = this.glb.runtimeLights;
+    if (!emitters) return;
+
+    const levelFor = (role, side = 'center') => (
+      showActive ? getLightShowLevel(showStep, role, side) : (levels[role] ?? 0)
+    );
+    for (const light of emitters.lowSpots) {
+      light.intensity = levelFor('lowBeam', light.userData.lightSide) * 10.0;
+    }
+    for (const light of emitters.highSpots) {
+      light.intensity = levelFor('highBeam', light.userData.lightSide) * 16.0;
+    }
+    for (const light of emitters.frontSignalPoints) {
+      light.intensity = levelFor('frontSignal', light.userData.lightSide) * 3.6;
+    }
+    for (const light of emitters.tailPoints) {
+      light.intensity = levelFor('tailLight', light.userData.lightSide) * 4.0 + (!showActive && brake ? 4.5 : 0);
+    }
+    for (const light of emitters.brakePoints) {
+      light.intensity = showActive
+        ? levelFor('brakeLight', light.userData.lightSide) * 8.5
+        : (brake ? 8.5 : 0);
+    }
+    for (const light of emitters.rearSignalPoints) {
+      light.intensity = levelFor('rearSignal', light.userData.lightSide) * 5.2;
+    }
+  }
+
+  _getLightShowStep() {
+    const index = Math.floor(this.lightShowTime / LIGHT_SHOW_STEP_SECONDS) % LIGHT_SHOW_PATTERN.length;
+    if (index !== this.lightShowStepIndex) this.lightShowStepIndex = index;
+    return LIGHT_SHOW_PATTERN[index];
   }
 
   _restoreFrozenGlbMechanicals() {
@@ -308,6 +590,47 @@ export class CarVisuals {
       base.obj.scale.copy(base.scale);
     }
   }
+}
+
+function getObjectCenterInParent(obj, parent) {
+  if (!obj) return null;
+  const box = new THREE.Box3().setFromObject(obj);
+  if (!Number.isFinite(box.min.x) || box.isEmpty()) return null;
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  return parent.worldToLocal(center);
+}
+
+function getLightSide(name = '', fallbackX = 0) {
+  const text = name.toLowerCase();
+  const anchored = text.match(/(?:headlight|taillight|mirror|trunklight|door|fender|mudflaps)[_.-]([lr])(?:[_.-]|$)/);
+  if (anchored?.[1] === 'l') return 'left';
+  if (anchored?.[1] === 'r') return 'right';
+  if (text.includes('trunklight_')) return 'center';
+  if (fallbackX < -0.01) return 'left';
+  if (fallbackX > 0.01) return 'right';
+  if (/(^|[_ .-])l([_ .-]|$)/.test(text) || text.includes('left')) return 'left';
+  if (/(^|[_ .-])r([_ .-]|$)/.test(text) || text.includes('right')) return 'right';
+  return 'center';
+}
+
+function getLightShowLevel(step, role, side = 'center') {
+  const roleLevels = step?.[role];
+  if (!roleLevels) return 0;
+  if (typeof roleLevels === 'number') return roleLevels;
+  return roleLevels[side] ?? roleLevels.all ?? 0;
+}
+
+function summarizeLightRoles(lightMats) {
+  const counts = new Map();
+  for (const { role, side } of lightMats) {
+    const key = `${role}:${side}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, count]) => `${key}=${count}`)
+    .join(', ');
 }
 
 function alignWheelWellsToPhysics(gltfRoot, car) {

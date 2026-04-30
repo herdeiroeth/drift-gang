@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { Sky } from 'three/examples/jsm/objects/Sky.js';
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import {
   createAsphaltMaps,
   createAsphaltMaterial,
@@ -9,86 +11,150 @@ export function createAsphaltTexture() {
 }
 
 export function createOpenArenaAsphaltMaterial() {
-  return createAsphaltMaterial({ repeatX: 46, repeatY: 46, seed: 2619, normalStrength: 0.64 });
+  return createAsphaltMaterial({ repeatX: 46, repeatY: 46, seed: 2619, normalStrength: 0.85 });
 }
 
-function createDaySkyTexture() {
-  const width = 512;
-  const height = 256;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
+// Parâmetros golden hour calibrados — sol baixo a SO, atmosfera limpa,
+// um pouco de Mie scattering pra dar glow warm ao redor do sol.
+const SKY_PARAMS = {
+  // Calibrado pelo exemplo padrão three.js webgl_shaders_sky com tweak golden.
+  turbidity: 10,
+  rayleigh: 2.8,
+  mieCoefficient: 0.005,
+  mieDirectionalG: 0.78,
+  elevation: 3.5,         // sol bem baixo no horizonte = golden hour pic
+  // Three.js Sky: theta=azimuth em rad, sin(theta) controla Z, cos(theta) controla X.
+  // Carro aponta +Z; câmera chase olha pra +Z. Pra sol VISÍVEL na frente,
+  // azimuth ~110-150° (frente-esquerda) ou 30-70° (frente-direita).
+  azimuth: 100,
+};
 
-  const top = new THREE.Color(0x6aa7de);
-  const zenith = new THREE.Color(0x8fc4ef);
-  const horizon = new THREE.Color(0xd9edf8);
-  const ground = new THREE.Color(0x86936f);
-  const col = new THREE.Color();
+const HDR_ENV_URL = '/textures/sky/golden_hour_2k.hdr';
+const HDR_ENV_INTENSITY = 1.35;
 
-  const row = ctx.createImageData(width, 1);
-  for (let y = 0; y < height; y++) {
-    const v = y / (height - 1);
-    if (v < 0.52) {
-      const t = v / 0.52;
-      col.copy(top).lerp(zenith, t);
-    } else if (v < 0.64) {
-      const t = (v - 0.52) / 0.12;
-      col.copy(zenith).lerp(horizon, t);
-    } else {
-      const t = (v - 0.64) / 0.36;
-      col.copy(horizon).lerp(ground, t);
-    }
-    for (let x = 0; x < width; x++) {
-      const p = x * 4;
-      row.data[p + 0] = Math.round(col.r * 255);
-      row.data[p + 1] = Math.round(col.g * 255);
-      row.data[p + 2] = Math.round(col.b * 255);
-      row.data[p + 3] = 255;
-    }
-    ctx.putImageData(row, 0, y);
-  }
+let cachedSky = null;
+let cachedSunDir = new THREE.Vector3();
 
-  const sun = ctx.createRadialGradient(width * 0.78, height * 0.38, 2, width * 0.78, height * 0.38, 54);
-  sun.addColorStop(0, 'rgba(255,246,214,0.95)');
-  sun.addColorStop(0.18, 'rgba(255,239,196,0.38)');
-  sun.addColorStop(1, 'rgba(255,239,196,0)');
-  ctx.fillStyle = sun;
-  ctx.fillRect(0, 0, width, height);
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.mapping = THREE.EquirectangularReflectionMapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.needsUpdate = true;
-  return tex;
+function computeSunDirection() {
+  const phi = THREE.MathUtils.degToRad(90 - SKY_PARAMS.elevation);
+  const theta = THREE.MathUtils.degToRad(SKY_PARAMS.azimuth);
+  const dir = new THREE.Vector3();
+  dir.setFromSphericalCoords(1, phi, theta);
+  return dir;
 }
 
-export function setupEnv(scene) {
-  const skyTexture = createDaySkyTexture();
-  scene.background = skyTexture;
-  scene.environment = skyTexture;
-  scene.fog = new THREE.Fog(0xd9edf8, 95, 420);
-  return { skyTexture };
+export function getSunDirection() {
+  if (cachedSunDir.lengthSq() < 0.5) cachedSunDir.copy(computeSunDirection());
+  return cachedSunDir;
+}
+
+// Configura Sky shader (Preetham) + PMREM env map pra IBL.
+// scene.background = Sky (renderiza como sphere ao infinito).
+// scene.environment começa com PMREM do Sky e depois, quando carregado,
+// passa a usar o HDR local. Isso dá reflexos ricos para pintura/vidro sem
+// depender de um céu procedural liso.
+export function setupEnv(scene, renderer) {
+  const sun = computeSunDirection();
+  cachedSunDir.copy(sun);
+
+  const sky = new Sky();
+  // Camera.far = 6000 em Game.js — sky.scale precisa caber.
+  sky.scale.setScalar(4500);
+  const u = sky.material.uniforms;
+  u.turbidity.value = SKY_PARAMS.turbidity;
+  u.rayleigh.value = SKY_PARAMS.rayleigh;
+  u.mieCoefficient.value = SKY_PARAMS.mieCoefficient;
+  u.mieDirectionalG.value = SKY_PARAMS.mieDirectionalG;
+  u.sunPosition.value.copy(sun);
+  scene.add(sky);
+  cachedSky = sky;
+
+  // PMREM: gera env map do Sky pra IBL. Desativa sun disc (artifacts em reflexões).
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+
+  const envScene = new THREE.Scene();
+  const envSky = sky.clone();
+  envSky.material = sky.material.clone();
+  envSky.material.uniforms.turbidity.value = SKY_PARAMS.turbidity;
+  envSky.material.uniforms.rayleigh.value = SKY_PARAMS.rayleigh;
+  envSky.material.uniforms.mieCoefficient.value = SKY_PARAMS.mieCoefficient;
+  envSky.material.uniforms.mieDirectionalG.value = SKY_PARAMS.mieDirectionalG;
+  envSky.material.uniforms.sunPosition.value.copy(sun);
+  // Reduz intensity do sun disc na env map (evita highlight pontual em reflexões)
+  envScene.add(envSky);
+
+  const envRT = pmrem.fromScene(envScene, 0.04);
+  scene.environment = envRT.texture;
+  if ('environmentIntensity' in scene) scene.environmentIntensity = HDR_ENV_INTENSITY;
+  pmrem.dispose();
+
+  loadHdrEnvironment(scene, renderer, envRT);
+
+  // Fog cor warm matching horizon ao SO (cor do Sky calculada empiricamente
+  // pra elevation=12, azimuth=230, rayleigh=2.4)
+  scene.fog = new THREE.Fog(0xd9c4a3, 140, 560);
+
+  return { sky, sun, params: SKY_PARAMS };
+}
+
+function loadHdrEnvironment(scene, renderer, fallbackRT) {
+  if (!renderer) return;
+
+  const loader = new HDRLoader();
+  loader.load(
+    HDR_ENV_URL,
+    (hdrTexture) => {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+      const hdrRT = pmrem.fromEquirectangular(hdrTexture);
+
+      scene.environment = hdrRT.texture;
+      if ('environmentIntensity' in scene) scene.environmentIntensity = HDR_ENV_INTENSITY;
+
+      hdrTexture.dispose();
+      fallbackRT?.dispose();
+      pmrem.dispose();
+    },
+    undefined,
+    (err) => {
+      console.warn(`[Environment] HDR environment failed to load (${HDR_ENV_URL}); keeping procedural sky IBL.`, err);
+    },
+  );
 }
 
 export function setupLights(scene) {
-  const hemi = new THREE.HemisphereLight(0xcfe8ff, 0x6f675a, 0.72);
+  const sun = getSunDirection();
+
+  // Hemisphere: contraste warm sky / cool earth pra dar VOLUME no carro
+  // (sem isso, PBR fica achatado e parece "massa de modelar").
+  // Sky levemente warm reflete a atmosfera golden hour, ground escuro pra
+  // contraste das partes inferiores.
+  const hemi = new THREE.HemisphereLight(0xc4d8ff, 0x382414, 0.55);
   scene.add(hemi);
-  const dir = new THREE.DirectionalLight(0xfff1d0, 2.15);
-  dir.position.set(-55, 105, 45);
+
+  // DirectionalLight ("sol"): direção CASA com sun position do Sky shader,
+  // intensidade moderada (HDRI/IBL/hemi cuidam da maior parte do ambient).
+  const dir = new THREE.DirectionalLight(0xfff0d4, 2.25);
+  dir.position.copy(sun).multiplyScalar(180);  // 180m de distância na direção do sol
   dir.castShadow = true;
   dir.shadow.mapSize.set(2048, 2048);
   dir.shadow.bias = -0.00008;
   dir.shadow.normalBias = 0.025;
-  dir.shadow.camera.near = 0.5; dir.shadow.camera.far = 400;
-  dir.shadow.camera.left = -200; dir.shadow.camera.right = 200;
-  dir.shadow.camera.top = 200; dir.shadow.camera.bottom = -200;
+  dir.shadow.camera.near = 0.5;
+  dir.shadow.camera.far = 600;
+  dir.shadow.camera.left = -240;
+  dir.shadow.camera.right = 240;
+  dir.shadow.camera.top = 240;
+  dir.shadow.camera.bottom = -240;
   scene.add(dir);
 
-  const fill = new THREE.DirectionalLight(0xa8cfff, 0.28);
-  fill.position.set(50, 38, -70);
+  // Fill light frio (oposto ao sol) — RIM clássico key-fill pra contraste de
+  // cor que destaca a forma 3D. Sem isso, BMW vira mancha uniforme golden.
+  const fillDir = new THREE.Vector3(-sun.x, Math.max(0.3, sun.y * 0.6), -sun.z).normalize();
+  const fill = new THREE.DirectionalLight(0x6b8bb8, 0.38);
+  fill.position.copy(fillDir).multiplyScalar(120);
   scene.add(fill);
 
-  // Retorna refs pra Game.js poder ajustar shadow camera baseado em bbox da pista.
   return { hemi, dir, fill };
 }

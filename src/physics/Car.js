@@ -768,6 +768,12 @@ export class Car {
     // Se bloqueado, gearbox.lastBlockedReason fica setado e o HUD pisca o motivo.
     if (input.once('KeyQ')) this.powertrain.gearbox.shiftDown();
     if (input.once('KeyE')) this.powertrain.gearbox.shiftUp();
+    if (input.once('KeyF')) {
+      this.visuals.cycleLightMode();
+    }
+    if (input.once('KeyG')) {
+      this.visuals.toggleLightShow();
+    }
 
     if (input.once('KeyT')) {
       const modes = ['off', 'low', 'high'];

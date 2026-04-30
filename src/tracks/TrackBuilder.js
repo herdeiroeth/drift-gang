@@ -4,11 +4,11 @@
 import * as THREE from 'three';
 import {
   createCurbTexture,
-  createGrassTexture,
-  createTrackAsphaltTexture,
-  createTrackAsphaltDetailMaps,
+  createTrackMarkingsTexture,
   createCheckerTexture,
 } from './TrackTextures.js';
+import { createAsphaltMaterial } from '../rendering/materials/Asphalt.js';
+import { createGrassMaterial } from '../rendering/materials/Grass.js';
 import { TRACK_CFG } from '../core/constants.js';
 import {
   buildCurve,
@@ -18,9 +18,10 @@ import {
   computeSamplesBbox,
 } from './TrackGeometry.js';
 
-// Y offsets pra evitar z-fight entre asfalto, curbs e terrain.
+// Y offsets pra evitar z-fight entre asfalto, markings overlay, curbs e terrain.
 const Y_TERRAIN = -0.05;
 const Y_ASPHALT = 0.0;
+const Y_MARKINGS = 0.004;   // overlay com markings 4mm acima do asfalto
 const Y_CHECKER = 0.015;
 // Curb agora tem perfil 3D próprio (rampa-plateau-rampa). Altura do plateau
 // e fração de rampa são parâmetros físicos — afetam o que a suspensão sente.
@@ -38,28 +39,41 @@ export function buildTrack(scene, trackData) {
   const halfWidth = trackData.width * 0.5;
   const curbWidth = trackData.curbWidth ?? 0;
 
-  // ---- Asfalto com markings bakedos
+  // ---- Asfalto base (PBR externo, anti-tile via shader patch)
+  // UV-V do mesh está em arc-length em metros, UV-U em [0,1] lateral.
+  // Tile lateral = trackData.width / 4 (≈ 3 metros por tile, casa com tamanho real
+  // do bloco de asfalto poly haven). Tile longitudinal = totalLength / 4.
   const asphaltGeo = buildSurfaceGeometry(samples, +halfWidth, -halfWidth, trackData.closed, Y_ASPHALT);
-
-  const asphaltTex = createTrackAsphaltTexture(totalLength, trackData.width);
-  // UV-V do mesh está em metros; repeat = 1/totalLength → textura cobre uma vez.
-  asphaltTex.repeat.set(1, 1 / totalLength);
-  asphaltTex.needsUpdate = true;
-  const asphaltDetailMaps = createTrackAsphaltDetailMaps(totalLength, trackData.width);
-
-  const asphaltMat = new THREE.MeshStandardMaterial({
-    map: asphaltTex,
-    normalMap: asphaltDetailMaps.normalMap,
-    roughnessMap: asphaltDetailMaps.roughnessMap,
-    normalScale: new THREE.Vector2(0.5, 0.5),
-    roughness: 0.96,
-    metalness: 0.0,
-    color: 0xffffff,
+  const tileLateral = Math.max(1, trackData.width / 4);
+  const tileLongitudinal = Math.max(1, totalLength / 4);
+  const asphaltMat = createAsphaltMaterial({
+    repeatX: tileLateral,
+    repeatY: tileLongitudinal,
+    seed: 3907,
+    normalStrength: 0.85,
   });
   const asphalt = new THREE.Mesh(asphaltGeo, asphaltMat);
   asphalt.receiveShadow = true;
   asphalt.userData.surfaceType = 'asphalt';
   scene.add(asphalt);
+
+  // ---- Markings overlay (linhas brancas + tracejado) — mesh sobreposto com
+  // canvas transparente. Usa polygonOffset + Y bump pra evitar z-fight.
+  const markingsGeo = buildSurfaceGeometry(samples, +halfWidth, -halfWidth, trackData.closed, Y_MARKINGS);
+  const markingsTex = createTrackMarkingsTexture(totalLength, trackData.width);
+  markingsTex.repeat.set(1, 1 / totalLength);
+  markingsTex.needsUpdate = true;
+  const markingsMat = new THREE.MeshBasicMaterial({
+    map: markingsTex,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
+  const markings = new THREE.Mesh(markingsGeo, markingsMat);
+  markings.userData.skipRaycast = true;
+  scene.add(markings);
 
   // ---- Curbs (zebras red/white) com perfil 3D real (rampa-plateau-rampa).
   // Volume sentido pelo raycast da suspensão → pneu sobe no kerb, suspensão
@@ -100,20 +114,17 @@ export function buildTrack(scene, trackData) {
     scene.add(curbRight);
   }
 
-  // ---- Terrain (grass plane gigante embaixo de tudo)
+  // ---- Terrain (grass plane gigante embaixo de tudo) — PBR externo
   const margin = trackData.terrainMargin ?? 200;
   const terrainSizeX = bbox.sizeX + margin * 2;
   const terrainSizeZ = bbox.sizeZ + margin * 2;
 
-  const grassTex = createGrassTexture();
-  grassTex.repeat.set(terrainSizeX / 4, terrainSizeZ / 4);
-  grassTex.needsUpdate = true;
-
-  const grassMat = new THREE.MeshStandardMaterial({
-    map: grassTex,
-    roughness: 1.0,
-    metalness: 0.0,
-    color: 0x6a8a5a,
+  // Tile ~4m por bloco — grass aerial poly haven foi capturada em ângulo,
+  // 4m casa bem com a escala da textura.
+  const grassMat = createGrassMaterial({
+    repeatX: terrainSizeX / 4,
+    repeatY: terrainSizeZ / 4,
+    normalStrength: 0.85,
   });
   const terrain = new THREE.Mesh(
     new THREE.PlaneGeometry(terrainSizeX, terrainSizeZ),
@@ -171,7 +182,7 @@ export function buildTrack(scene, trackData) {
   for (const m of groundObjects) m.updateMatrixWorld(true);
 
   return {
-    meshes: { asphalt, curbLeft, curbRight, terrain, startChecker },
+    meshes: { asphalt, markings, curbLeft, curbRight, terrain, startChecker },
     groundObjects,
     spawn,
     gates,

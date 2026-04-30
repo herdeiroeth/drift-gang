@@ -4,6 +4,7 @@ import { Car } from '../physics/Car.js';
 import { CamCtrl } from '../rendering/Camera.js';
 import { setupEnv, setupLights } from '../rendering/Environment.js';
 import { buildOpenArena } from '../rendering/Arena.js';
+import { buildScenery } from '../rendering/Scenery.js';
 import { buildTrack } from '../tracks/TrackBuilder.js';
 import { track01 } from '../tracks/track01.js';
 import { SmokeSystem } from '../rendering/particles/SmokeSystem.js';
@@ -21,6 +22,7 @@ import { Telemetry } from '../ui/Telemetry.js';
 import { CameraStudioUI } from '../ui/CameraStudioUI.js';
 import { loadCarModel } from '../rendering/car/loaders/CarModelLoader.js';
 import { VISUAL_CFG } from '../rendering/car/CarVisualConfig.js';
+import { setRendererCapabilities } from '../rendering/materials/PBRTextureLoader.js';
 
 // Toggle de modo: pista vs arena livre. Default: pista (Pista 1).
 // Arena livre é mantido para testes de tuning sem voltas (legado).
@@ -55,21 +57,24 @@ export class Game {
     this.canvas = document.getElementById('game-canvas');
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.04;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
+    // Propaga capabilities (max anisotropy) pro PBRTextureLoader.
+    setRendererCapabilities(this.renderer);
+
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 600);
+    this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 6000);
 
     this.input = new Input();
     this.smoke = new SmokeSystem(this.scene);
     this.skids = new SkidSystem(this.scene);
 
-    setupEnv(this.scene);
+    this.env = setupEnv(this.scene, this.renderer);
     this.lights = setupLights(this.scene);
 
     if (USE_TRACK) {
@@ -81,10 +86,15 @@ export class Game {
       this.arena = null;
       // Ajustar shadow camera ao bbox da pista pra sombras crisp em pista grande.
       this._fitShadowCameraToTrack(this.track.bbox);
+      // Cenário 3D: árvores, plantação, postes, torres ao redor da pista.
+      this.scenery = buildScenery(this.scene, { bbox: this.track.bbox });
     } else {
       this.arena = buildOpenArena(this.scene);
       this.groundObjects = this.arena.groundObjects;
       this.track = null;
+      this.scenery = buildScenery(this.scene, {
+        bbox: { cx: 0, cz: 0, sizeX: 360, sizeZ: 360, minX: -180, maxX: 180, minZ: -180, maxZ: 180 },
+      });
     }
     this.car = new Car(this.scene, this.groundObjects, { gltfScene: this.opts.gltfScene });
     this.camCtrl = new CamCtrl(this.camera);
@@ -129,7 +139,7 @@ export class Game {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(window.innerWidth, window.innerHeight);
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     });
   }
 
@@ -172,6 +182,18 @@ export class Game {
     this.groundObjects = this.track.groundObjects;
     this.car.groundObjects = this.groundObjects;
     this._fitShadowCameraToTrack(this.track.bbox);
+    // Reconstrói scenery com bbox atualizada
+    if (this.scenery) {
+      this.scene.remove(this.scenery);
+      this.scenery.traverse(o => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) {
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach(m => m && m.dispose());
+        }
+      });
+    }
+    this.scenery = buildScenery(this.scene, { bbox: this.track.bbox });
     // Recria LapSystem preservando best stats
     if (this.lapSystem) {
       const stats = {

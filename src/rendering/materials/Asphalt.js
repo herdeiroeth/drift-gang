@@ -1,7 +1,9 @@
 import * as THREE from 'three';
+import { loadPBRSet, createVariationTexture, patchAntiTile, getMaxAnisotropy } from './PBRTextureLoader.js';
 
 const DEFAULT_SIZE = 512;
 const DEFAULT_SEED = 1847;
+const ASPHALT_BASE_PATH = 'textures/asphalt';
 
 function mulberry32(seed) {
   let t = seed >>> 0;
@@ -174,19 +176,52 @@ export function createAsphaltDetailMaps({
   };
 }
 
+// Cria material PBR de asfalto. Tenta carregar texturas externas em
+// `public/textures/asphalt/` (CC0 polyhaven). Se falhar, mantém o fallback
+// procedural Canvas. Aplica anti-tile via detail mapping (mesmo normalMap em
+// tile 4×) + variation map (fBm low-freq modulando albedo).
 export function createAsphaltMaterial({
   repeatX = 40,
   repeatY = 40,
   seed = DEFAULT_SEED,
   normalStrength = 0.58,
-  anisotropy = 8,
+  anisotropy = 16,
+  useExternal = true,
+  variationSeed = 7321,
 } = {}) {
-  const maps = createAsphaltMaps({ repeatX, repeatY, seed, anisotropy });
-  return new THREE.MeshStandardMaterial({
+  const aniso = Math.min(anisotropy, getMaxAnisotropy());
+  const maps = createAsphaltMaps({ repeatX, repeatY, seed, anisotropy: aniso });
+  const material = new THREE.MeshStandardMaterial({
     ...maps,
     color: 0xffffff,
     roughness: 0.96,
     metalness: 0.0,
     normalScale: new THREE.Vector2(normalStrength, normalStrength),
   });
+
+  if (useExternal) {
+    const set = loadPBRSet({
+      basePath: ASPHALT_BASE_PATH,
+      repeatX,
+      repeatY,
+      anisotropy: aniso,
+    });
+    set.applyTo(material);
+    set.promise.then(() => {
+      // Detail mapping reusa a própria normalMap PBR — a UV scale é controlada
+      // no shader (uDetailScale), não no .repeat da textura.
+      const variation = createVariationTexture({ size: 256, seed: variationSeed });
+      patchAntiTile(material, {
+        detailNormalMap: material.normalMap,
+        detailScale: 4.0,
+        detailStrength: 0.35,
+        variationMap: variation,
+        variationScale: 1.0 / Math.max(repeatX, repeatY),
+        variationLow: 0.82,
+        variationHigh: 1.16,
+      });
+    });
+  }
+
+  return material;
 }
