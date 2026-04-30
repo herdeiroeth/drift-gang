@@ -65,6 +65,14 @@ export class Engine {
     this.revLimitRPM    = opts.revLimitRPM    ?? 7200;
     this.revLimitMode   = opts.revLimitMode   ?? 'hard';    // 'hard'|'soft'|'2step'
 
+    // Throttle lag (ETC sensor-to-plate delay). 0 = instantâneo (default).
+    // Ativado via vehicle data (M4 S55 = 80ms). Implementado como filtro de
+    // 1ª ordem entre _targetThrottle (input do player) e throttlePos (efetivo
+    // no torque). Filtragem ocorre em tickThrottle(dt) chamado pelo
+    // PowertrainSystem antes de updateFree/updateLocked.
+    this._throttleTau     = (opts.throttleLagMs ?? 0) / 1000;
+    this._targetThrottle  = 0;
+
     // Estado
     this.rpm            = this.idleRPM;
     this.angularVel     = this.rpmToOmega(this.rpm);
@@ -206,7 +214,24 @@ export class Engine {
     }
   }
 
-  setThrottle(t) { this.throttlePos = Math.max(0, Math.min(1, t)); }
+  setThrottle(t) {
+    this._targetThrottle = Math.max(0, Math.min(1, t));
+    // Sem lag: aplica direto (retrocompat com defaults sem throttleLagMs).
+    if (this._throttleTau <= 0) this.throttlePos = this._targetThrottle;
+  }
+
+  /**
+   * Aplica filtro 1ª ordem no throttlePos rumo ao _targetThrottle.
+   * Chamado pelo PowertrainSystem.update() ANTES de updateFree/updateLocked,
+   * para que o torque integrado no sub-step use a posição já filtrada.
+   * dt em segundos (sub-step do powertrain).
+   */
+  tickThrottle(dt) {
+    if (this._throttleTau <= 0) return;
+    const alpha = 1 - Math.exp(-dt / this._throttleTau);
+    this.throttlePos += (this._targetThrottle - this.throttlePos) * alpha;
+  }
+
   setRPM(rpm) {
     this.rpm = Math.max(0, Math.min(this.maxRPM, rpm));
     this.angularVel = this.rpmToOmega(this.rpm);
@@ -330,8 +355,9 @@ export class Clutch {
 
 export class Gearbox {
   constructor(opts = {}) {
-    this.gearRatios = opts.gearRatios ?? [0, -2.9, 3.6, 2.2, 1.5, 1.1, 0.85, 0.65];
-    // index: 0=neutral, 1=reverse, 2=1st, 3=2nd, etc.
+    // Default M4 DCT 7v: 9 elementos (0=N, 1=R, 2..8=1ª..7ª).
+    this.gearRatios = opts.gearRatios ?? [0, -3.20, 4.806, 2.593, 1.701, 1.277, 1.000, 0.834, 0.668];
+    // index: 0=neutral, 1=reverse, 2=1st, 3=2nd, ..., 8=7th
     this.mode = opts.mode ?? 'h_pattern';        // 'h_pattern' | 'sequential'
     this.shiftTime = opts.shiftTime ?? (this.mode === 'sequential' ? 0.06 : 0.35);
     this.currentGear = 2;  // start in 1st
@@ -430,6 +456,28 @@ export class Gearbox {
         const projected = this.projectedRPMInGear(next, this._lastWheelOmega, this._finalDrive);
         if (projected < this.engineIdleRPM * 0.85) {
           this._flagBlocked('bog');
+          return false;
+        }
+      }
+
+      // Wheelspin gating (auto-shift only): em wheelspin, avgRearWheelOmega
+      // mente — a roda gira pela inércia do motor, não pela velocidade real
+      // do carro. ECU real de DCT lê o vehicle speed sensor (não o wheel
+      // speed cru) pra decidir upshift. Aqui usamos `_vehicleWheelOmega` =
+      // speedMS/wheelRadius, que reflete só a velocidade efetiva do carro.
+      //
+      // Se o RPM motor projetado pela velocidade do CARRO (não pela roda
+      // patinando) ficar abaixo de minPostUpshiftRPM, recusa upshift —
+      // pneu ainda não engatou, esperar antes de subir gear.
+      //
+      // Só aplica em auto-shift; manual shift em launch prep continua livre.
+      if (this._isAutoShiftPending
+          && this._vehicleWheelOmega !== undefined
+          && this._vehicleWheelOmega !== null) {
+        const projectedFromVehicle = this.projectedRPMInGear(
+          next, this._vehicleWheelOmega, this._finalDrive);
+        if (projectedFromVehicle < this.minPostUpshiftRPM) {
+          this._flagBlocked('wheelspin_no_speed');
           return false;
         }
       }
@@ -542,9 +590,14 @@ export class Gearbox {
     }
 
     // Comando da ECU (setado via `setAutoShiftCommand` antes deste update).
+    // Flag `_isAutoShiftPending` permite ao shiftUp aplicar gating extra de
+    // wheelspin (vehicleWheelOmega) só quando o comando vem da ECU; manual
+    // shifts em standstill (launch prep) continuam livres.
     if (this.autoShift && this.shiftCooldown <= 0 && this._autoShiftCommand) {
       if (this._autoShiftCommand === 'up') {
+        this._isAutoShiftPending = true;
         this.shiftUp();
+        this._isAutoShiftPending = false;
       } else if (this._autoShiftCommand === 'down') {
         this.shiftDown();
       }
@@ -844,53 +897,112 @@ export class LaunchControl {
 
 export class Turbocharger {
   constructor(opts = {}) {
+    // Teto físico do boost (válvula de pop-off do turbocompressor; nunca
+    // ultrapassa). wastegateBoost é o setpoint normal de operação (ECU).
     this.maxBoost       = opts.maxBoost       ?? 1.0;    // bar
-    this.spoolRate      = opts.spoolRate      ?? 2.5;    // resposta do boost
-    this.lagFactor      = opts.lagFactor      ?? 0.85;   // 0=lento, 1=instantâneo
-    this.blowOffEnabled = opts.blowOffEnabled ?? true;
+    this.wastegateBoost = opts.wastegateBoost ?? this.maxBoost;
 
-    this.boostBar = 0;     // boost atual em bar
-    this.turboRPM = 0;     // RPM da turbina (para visual/sonoro)
-    this.isSpooling = false;
+    // Modelo escalar legacy (usado quando boostMap não é fornecido).
+    this.spoolRate      = opts.spoolRate      ?? 2.5;
+    this.lagFactor      = opts.lagFactor      ?? 0.85;
+
+    // Modelo novo: lag físico via constante de tempo τ explícita (s).
+    // 95% do target em ~3τ. Default 0.18s = M4 S55 biturbo.
+    this.spoolTau       = opts.spoolTau       ?? null;   // null = usa spoolRate*lagFactor
+
+    // Blow-off (BOV) com histerese. dispara somente se boost atual >=
+    // blowOffMinBoost E throttle caiu de >0.4 pra <0.1.
+    this.blowOffEnabled    = opts.blowOffEnabled    ?? true;
+    this.blowOffMinBoost   = opts.blowOffMinBoost   ?? 0.35;   // bar
+    this.blowOffDumpFactor = opts.blowOffDumpFactor ?? 0.30;   // boost remanescente
+
+    // Boost map 2D: tabelas RPM × throttle → target boost (bar).
+    // Quando definido, substitui a heurística RPM^1.3·throttle pelo lookup.
+    this.boostMap         = opts.boostMap         ?? null;
+    this.boostMapRPM      = opts.boostMapRPM      ?? null;
+    this.boostMapThrottle = opts.boostMapThrottle ?? null;
+
+    // Estado runtime
+    this.boostBar      = 0;
+    this.turboRPM      = 0;
+    this.isSpooling    = false;
+    this.blowOffPulse  = false;   // flag de 1 frame pra HUD/áudio
     this._lastThrottle = 0;
   }
 
   update(dt, engineRPM, throttleInput, wheelEngagement = 1.0) {
-    // Exhaust flow → target boost
-    // Quanto mais alto o rpm e mais aberto o throttle, mais boost.
-    // wheelEngagement (0..1) atenua o exhaustFlow quando o drivetrain não
-    // está acompanhando o motor (clutch slipping em arrancada): sem essa
-    // atenuação, o turbo spoolava para 0.8 bar em standstill com motor
-    // alto, e na hora que a roda finalmente engatava, vinha pancada de
-    // torque desproporcional (wheelie/instabilidade na arrancada).
-    const rpmNorm = Math.min(1.0, engineRPM / 7000);
-    const exhaustFlow = throttleInput * Math.pow(rpmNorm, 1.3) * wheelEngagement;
-    const targetBoost = this.maxBoost * exhaustFlow;
+    // 1) Target boost — boost map 2D se disponível, senão fórmula legacy.
+    //    wheelEngagement (0..1) atenua o spool quando drivetrain não acompanha
+    //    o motor (clutch slipping). Sem isso, turbo spoolava em standstill
+    //    com motor alto e arrancada virava pancada de torque (wheelie).
+    let targetBoost;
+    if (this.boostMap && this.boostMapRPM && this.boostMapThrottle) {
+      targetBoost = this._lookupBoostMap(engineRPM, throttleInput) * wheelEngagement;
+    } else {
+      const rpmNorm = Math.min(1.0, engineRPM / 7000);
+      const exhaustFlow = throttleInput * Math.pow(rpmNorm, 1.3) * wheelEngagement;
+      targetBoost = this.maxBoost * exhaustFlow;
+    }
 
-    // Lag exponencial (turbo é lenta)
-    this.boostBar += (targetBoost - this.boostBar) * this.spoolRate * dt * this.lagFactor;
+    // 2) Wastegate clamp. ECU abre wastegate quando boost atinge setpoint;
+    //    teto duro físico (maxBoost) protege contra pop-off em map maluco.
+    if (this.wastegateBoost) {
+      targetBoost = Math.min(targetBoost, this.wastegateBoost);
+    }
+    if (targetBoost > this.maxBoost) targetBoost = this.maxBoost;
+
+    // 3) Lag físico — exponencial discreta com τ explícita.
+    //    Fallback: mantém compatibilidade com spoolRate*lagFactor legacy.
+    let alpha;
+    if (this.spoolTau && this.spoolTau > 0) {
+      alpha = 1 - Math.exp(-dt / this.spoolTau);
+    } else {
+      alpha = Math.min(1, this.spoolRate * dt * this.lagFactor);
+    }
+    this.boostBar += (targetBoost - this.boostBar) * alpha;
     if (this.boostBar < 0) this.boostBar = 0;
 
-    // Turbo shaft RPM (para efeito visual)
-    this.turboRPM = this.boostBar * 150000;  // 1 bar ≈ 150k turb RPM
+    // 4) Turbo shaft RPM (visual/áudio futuro). 1 bar ≈ 150k turb RPM.
+    this.turboRPM = this.boostBar * 150000;
 
-    // Blow-off quando solta o acelerador (dump de pressão)
-    if (this.blowOffEnabled && throttleInput < 0.1 && this._lastThrottle > 0.3) {
-      // Quando solta o acelerador com boost alto → hiss
-      if (this.boostBar > 0.3) {
-        // Blow-off event — pode disparar som/efeito
-        // Aqui apenas derruba a pressão rápido
-      }
-      this.boostBar *= 0.3;  // dump rápido
+    // 5) Blow-off com histerese — só dispara se boost real estava alto E
+    //    throttle caiu de muito aberto pra fechado. Evita disparo em
+    //    transiente curto (tap-tap rápido). Flag pulse pro HUD/áudio.
+    this.blowOffPulse = false;
+    if (this.blowOffEnabled
+        && throttleInput < 0.1
+        && this._lastThrottle > 0.4
+        && this.boostBar >= this.blowOffMinBoost) {
+      this.blowOffPulse = true;
+      this.boostBar *= this.blowOffDumpFactor;
     }
 
     this._lastThrottle = throttleInput;
     this.isSpooling = this.boostBar > 0.05 && targetBoost > this.boostBar;
   }
 
+  // Bilinear interpolation no boost map 2D. RPM e throttle são clampados
+  // ao range das tabelas (extrapolação seria perigosa em mapas táticos).
+  _lookupBoostMap(rpm, thr) {
+    const rArr = this.boostMapRPM;
+    const tArr = this.boostMapThrottle;
+    const M    = this.boostMap;
+    const r = Math.max(rArr[0], Math.min(rArr[rArr.length - 1], rpm));
+    const t = Math.max(tArr[0], Math.min(tArr[tArr.length - 1], thr));
+    let i = 0; while (i < rArr.length - 2 && r > rArr[i + 1]) i++;
+    let j = 0; while (j < tArr.length - 2 && t > tArr[j + 1]) j++;
+    const fr = (r - rArr[i]) / (rArr[i + 1] - rArr[i]);
+    const ft = (t - tArr[j]) / (tArr[j + 1] - tArr[j]);
+    const v00 = M[i][j],     v10 = M[i + 1][j];
+    const v01 = M[i][j + 1], v11 = M[i + 1][j + 1];
+    return v00 * (1 - fr) * (1 - ft)
+         + v10 * fr       * (1 - ft)
+         + v01 * (1 - fr) * ft
+         + v11 * fr       * ft;
+  }
+
   // Torque multiplier: engineTorque *= mult
   // AC modding standard: 1 bar de boost = +100% torque.
-  // MAX_BOOST=1.5 (default Turbo) ⇒ até +150% no peak.
   getTorqueMultiplier() {
     return 1.0 + this.boostBar;
   }
@@ -935,14 +1047,21 @@ export class ECU {
     // Cada entrada controla a transição PARA a próxima marcha, e o downshift
     // PARA voltar à atual quando estamos uma acima.
     //
-    // Defaults calibrados pra motor 1.8L turbo @ redline 7200, peak power 5500.
-    // Garantem margem de hunting ≥ 440 RPM em WOT (ver PESQUISA_SHIFT_LOGIC_REAL.md).
+    // Defaults calibrados pra M4 S55 @ redline 7300, peak power ~7000.
+    // Cobre 7 marchas (DCT). Garantem margem de hunting ≥ 440 RPM em WOT.
+    //
+    // Entrada `N` controla a marcha em que você está (currentGear=N): define
+    // `upWOT/upCruise` (subir pra N+1) e `downWOT/downCruise` (descer pra N-1).
+    // A ÚLTIMA marcha precisa de entrada própria com `up=Infinity` — sem ela,
+    // o downshift nunca dispara em 7ª e o carro fica preso em RPM baixa.
     this.shiftMap = opts.shiftMap ?? {
-      2: { upWOT: 6500, upCruise: 3000, downWOT: 3500, downCruise: 1700 },  // 1ª↔2ª
-      3: { upWOT: 6300, upCruise: 2800, downWOT: 3700, downCruise: 1700 },  // 2ª↔3ª
-      4: { upWOT: 6200, upCruise: 2600, downWOT: 3900, downCruise: 1700 },  // 3ª↔4ª
-      5: { upWOT: 6000, upCruise: 2400, downWOT: 4000, downCruise: 1700 },  // 4ª↔5ª
-      6: { upWOT: 5800, upCruise: 2200, downWOT: 4000, downCruise: 1700 },  // 5ª↔6ª
+      2: { upWOT: 6800, upCruise: 3000, downWOT: 3500, downCruise: 1700 },  // 1ª (sobe→2ª, desce→R/N inválido)
+      3: { upWOT: 6600, upCruise: 2800, downWOT: 3700, downCruise: 1700 },  // 2ª
+      4: { upWOT: 6400, upCruise: 2600, downWOT: 3900, downCruise: 1700 },  // 3ª
+      5: { upWOT: 6200, upCruise: 2400, downWOT: 4000, downCruise: 1700 },  // 4ª
+      6: { upWOT: 6000, upCruise: 2200, downWOT: 4000, downCruise: 1700 },  // 5ª
+      7: { upWOT: 5800, upCruise: 2000, downWOT: 4000, downCruise: 1700 },  // 6ª
+      8: { upWOT: Infinity, upCruise: Infinity, downWOT: 4200, downCruise: 1700 }, // 7ª (topo, só desce)
     };
 
     // Janelas temporais (ms → s internamente)
@@ -1234,6 +1353,9 @@ export class PowertrainSystem {
 
     // 1. Inputs → componentes
     this.engine.setThrottle(throttle);
+    // Filtra _targetThrottle → throttlePos com τ definida (ETC lag). No-op
+    // quando _throttleTau<=0 (defaults sem vehicle data).
+    this.engine.tickThrottle(dt);
     this.clutch.setPedal(clutchPedal);
 
     if (shiftUp) this.gearbox.shiftUp();
@@ -1284,6 +1406,13 @@ export class PowertrainSystem {
     //     a roda mais lenta projeta o RPM mais conservador → bloqueia shift
     //     que faria mesmo um lado dar overrev. (`shiftDown` em Gearbox usa
     //     `_lastWheelOmega` setado aqui, via `projectedRPMInGear`.)
+    //
+    //     `_vehicleWheelOmega` = velocidade do CARRO convertida pra omega de
+    //     roda (sem wheelspin). Em wheelspin, wheelOmega cru mente — pneu
+    //     gira pela inércia do motor, não pela velocidade real. Auto-shift
+    //     usa esse signal pra recusar upshift cascade em standstill+wheelspin.
+    const wheelRadius = wRL.cfg?.wheelRadius ?? 0.337;
+    this.gearbox._vehicleWheelOmega = Math.abs(speedMS) / Math.max(0.01, wheelRadius);
     this.gearbox.update(dt, this.engine.rpm, throttle, slowestRearOmega, this.finalDrive, handbrake);
 
     // 5. Launch control
@@ -1299,12 +1428,22 @@ export class PowertrainSystem {
     if (this.turbo) {
       // wheelEngagement = quão acoplada a roda está com o motor (0..1).
       // Em arrancada com clutch slipping, drivetrain ω ≪ engine ω → ratio
-      // baixo → turbo cresce mais devagar. Floor 0.2 garante que turbo
-      // ainda spoola em standstill (não fica completamente apagado).
+      // baixo → turbo cresce mais devagar.
+      //
+      // Floor 0.55: turbo real continua bombando ar mesmo em wheelspin
+      // sustentado porque o motor está em alta RPM e o exhaust flow é alto.
+      // Antes 0.2 estrangulava boost durante wheelspin de upshift e em
+      // arrancadas agressivas, deixando motor "fraco" em alta marcha.
+      // 0.55 mantém ~50% do boost target em wheelspin total e converge
+      // pra 1.0 conforme drivetrain alcança engine.
+      //
+      // Durante isShifting (sequencial 60ms), getGearRatio() retorna 0 →
+      // ratio cai pra floor. O floor preserva boost durante o shift blip,
+      // que é o comportamento físico real do turbo (continua spoolado).
       const ptGearRatio = this.gearbox.getGearRatio();
       const drivetrainSideOmega = avgRearOmega * ptGearRatio * this.finalDrive;
       const engineOmegaAbs = Math.max(50, Math.abs(this.engine.angularVel));
-      const wheelEngagement = Math.max(0.2,
+      const wheelEngagement = Math.max(0.55,
         Math.min(1.0, Math.abs(drivetrainSideOmega) / engineOmegaAbs));
       this.turbo.update(dt, this.engine.rpm, throttle, wheelEngagement);
       turboMult = this.turbo.getTorqueMultiplier();

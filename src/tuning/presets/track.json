@@ -2,7 +2,7 @@
   "name": "Track",
   "description": "LSD com coast lock alto, anti-dive/squat fortes, camber generoso, RL médio — rápido em pista",
   "finalDrive": 3.40,
-  "gearRatios": [0, -2.9, 3.40, 2.10, 1.55, 1.20, 0.95, 0.75],
+  "gearRatios": [0, -2.9, 3.40, 2.10, 1.55, 1.20, 0.95, 0.75, 0.62],
   "differential": { "type": "lsd_clutch", "preload": 80, "powerLock": 0.30, "coastLock": 0.40 },
   "tcMode": "off",
   "brakeBiasFront": 0.62,

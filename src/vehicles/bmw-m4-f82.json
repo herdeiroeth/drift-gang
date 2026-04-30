@@ -1,0 +1,101 @@
+{
+  "meta": {
+    "manufacturer": "BMW",
+    "model": "M4 F82",
+    "engine": "S55B30",
+    "year": 2017,
+    "drivetrain": "RWD",
+    "transmission": "DCT 7v Getrag",
+    "notes": "Stock S55, peak power 425cv @ 7300 RPM, peak torque 550Nm @ 1850-5500 RPM, peak boost ~1.20 bar (17.4 psi)"
+  },
+
+  "chassis": {
+    "mass": 1565,
+    "cgToFrontAxle": 1.339,
+    "cgToRearAxle": 1.471,
+    "cgHeight": 0.51,
+    "halfWidth": 0.785,
+    "wheelRadius": 0.337,
+    "wheelMass": 22.0,
+    "Cdrag": 0.34,
+    "Crr": 0.012
+  },
+
+  "engine": {
+    "idleRPM": 700,
+    "redlineRPM": 7300,
+    "revLimitRPM": 7300,
+    "maxRPM": 7600,
+    "stallRPM": 350,
+    "inertia": 0.20,
+    "frictionPassive": 18.0,
+    "frictionLinear": 0.012,
+    "frictionQuadratic": 1.6e-5,
+    "coastTorque": 220.0,
+    "throttleLagMs": 80,
+    "torqueCurve": [
+      { "r": 700,  "t": 200 },
+      { "r": 1200, "t": 320 },
+      { "r": 1500, "t": 420 },
+      { "r": 1850, "t": 550 },
+      { "r": 2500, "t": 550 },
+      { "r": 3500, "t": 550 },
+      { "r": 4500, "t": 550 },
+      { "r": 5500, "t": 550 },
+      { "r": 6000, "t": 510 },
+      { "r": 6500, "t": 470 },
+      { "r": 7300, "t": 415 },
+      { "r": 7600, "t": 360 }
+    ]
+  },
+
+  "turbo": {
+    "maxBoost": 1.24,
+    "wastegateBoost": 1.20,
+    "spoolTimeConstant": 0.18,
+    "blowOffEnabled": true,
+    "blowOffMinBoost": 0.35,
+    "boostMapRPM":      [1000, 1500, 2000, 2500, 3000, 4000, 5000, 5500, 6000, 6500, 7300],
+    "boostMapThrottle": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "boostMap": [
+      [0, 0.05, 0.10, 0.10, 0.10],
+      [0, 0.10, 0.30, 0.55, 0.75],
+      [0, 0.15, 0.50, 0.90, 1.10],
+      [0, 0.18, 0.60, 1.05, 1.20],
+      [0, 0.20, 0.65, 1.10, 1.24],
+      [0, 0.20, 0.65, 1.10, 1.22],
+      [0, 0.18, 0.60, 1.05, 1.20],
+      [0, 0.15, 0.55, 1.00, 1.15],
+      [0, 0.12, 0.50, 0.95, 1.10],
+      [0, 0.10, 0.45, 0.90, 1.07],
+      [0, 0.08, 0.40, 0.85, 1.05]
+    ]
+  },
+
+  "drivetrain": {
+    "finalDrive": 3.154,
+    "gearRatios": [0, -3.20, 4.806, 2.593, 1.701, 1.277, 1.000, 0.834, 0.668],
+    "gearboxMode": "sequential",
+    "shiftTimeMs": 60,
+    "transEfficiency": 0.926,
+    "differential": {
+      "type": "lsd_clutch",
+      "preload": 100,
+      "powerLock": 0.45,
+      "coastLock": 0.30,
+      "efficiency": 0.95
+    }
+  },
+
+  "assists": {
+    "tcMode": "off",
+    "brakeBiasFront": 0.62
+  },
+
+  "tire": {
+    "mu": 1.35,
+    "loadSensN": 0.88,
+    "relaxationLength": 0.30,
+    "tireDriftBias": 0.50
+  }
+}

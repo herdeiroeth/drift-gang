@@ -2,7 +2,7 @@
   "name": "Drift Pro",
   "description": "Welded, sequential, anti-squat baixo (rear escapa fácil), camber agressivo, RL curto",
   "finalDrive": 3.90,
-  "gearRatios": [0, -2.9, 2.95, 1.85, 1.40, 1.10, 0.90, 0.72],
+  "gearRatios": [0, -2.9, 2.95, 1.85, 1.40, 1.10, 0.90, 0.72, 0.61],
   "differential": { "type": "welded", "preload": 150, "powerLock": 1.0, "coastLock": 1.0 },
   "tcMode": "off",
   "brakeBiasFront": 0.50,

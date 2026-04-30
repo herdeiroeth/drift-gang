@@ -21,6 +21,7 @@ import { Telemetry } from '../ui/Telemetry.js';
 import { CameraStudioUI } from '../ui/CameraStudioUI.js';
 import { loadCarModel } from '../rendering/car/loaders/CarModelLoader.js';
 import { VISUAL_CFG } from '../rendering/car/CarVisualConfig.js';
+import { loadVehicle } from '../vehicles/loader.js';
 
 // Toggle de modo: pista vs arena livre. Default: pista (Pista 1).
 // Arena livre é mantido para testes de tuning sem voltas (legado).
@@ -94,6 +95,10 @@ export class Game {
       this.track = null;
     }
     this.car = new Car(this.scene, this.groundObjects, { gltfScene: this.opts.gltfScene });
+    // Aplica vehicle data (BMW M4 F82 S55 + DCT 7v) — sobrescreve defaults
+    // arcade do CarConfig/Powertrain com valores ground-truth do veículo.
+    // Presets aplicados depois (em runtime via TuningUI) viram tune deltas.
+    this.car.applyVehicleData(loadVehicle('bmw-m4-f82'));
     this.camCtrl = new CamCtrl(this.camera);
 
     this.hud = new HUDManager();

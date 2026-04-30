@@ -61,6 +61,29 @@ export const PHYSICS_CFG = {
   // drivetrainRPM (RPM virtual da roda) em vez de engineRPM como sinal.
   // Isso evita pular pra 6ª em arrancada.
   autoShiftUseDrivetrainRPMWhenSlip: true,
+
+  // ----- Engine (vehicle-data driven) -----
+  // Defaults usados quando vehicle data não especifica. Engine real BMW S55
+  // tem ETC com ~80ms de delay sensor-to-throttle-plate.
+  engine: {
+    defaultThrottleLagMs: 80,
+    // Expoente do throttle parcial no boost map lookup. >1 = throttle parcial
+    // entrega proporcionalmente menos boost (real ETC mapping não é linear).
+    partialThrottleExponent: 1.6,
+  },
+
+  // ----- Turbo (vehicle-data driven) -----
+  // S55 biturbo: spool tau ≈ 180ms (95% boost em ~540ms WOT).
+  turbo: {
+    defaultSpoolTau: 0.18,        // s — constante de tempo do filtro 1ª ordem
+    blowOffMinBoost: 0.35,        // bar — histerese do BOV (não dispara em transientes)
+    blowOffDumpFactor: 0.30,      // boost remanescente após BOV (30% do que tinha)
+  },
+
+  // ----- Drivetrain -----
+  drivetrain: {
+    defaultDctShiftMs: 60,        // DCT 7v Getrag tempo de troca real
+  },
 };
 
 // Multiplicador de mu por superfície. Aplicado em Wheel.updateTireForces
