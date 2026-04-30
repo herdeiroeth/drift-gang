@@ -56,8 +56,18 @@ export class CarConfig {
     this.brakeBiasFront = opts.brakeBiasFront ?? 0.62;
     this.ebrakeTorque = opts.ebrakeTorque ?? 2000.0;
 
-    this.maxSteer = opts.maxSteer ?? 0.70;
+    // Drift street default — 60° (1.0472 rad). Slider 30°-75° na TuningUI.
+    // Antes 0.70 rad (~40°) era nível "carro de passeio" — não fechava curva
+    // nem deixava contra-esterçar em correção de drift.
+    this.maxSteer = opts.maxSteer ?? 1.0472;
     this.ackermannFactor = opts.ackermannFactor ?? 0.85;
+
+    // applySafeSteer — reduz input em alta velocidade (anti-flip).
+    // Default 0.20 (era 0.45 hard-coded em Car.js — cortava drift correction).
+    // 0 = desligado; 0.50 = corte agressivo de até metade.
+    // Ref speed = velocidade onde redução atinge o máximo (m/s).
+    this.steerSpeedReduction    = opts.steerSpeedReduction    ?? 0.20;
+    this.steerSpeedReductionRef = opts.steerSpeedReductionRef ?? 55.0;
 
     this.Cdrag = opts.Cdrag ?? 0.40;
     this.Crr = opts.Crr ?? 0.012;

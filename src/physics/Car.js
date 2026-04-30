@@ -257,8 +257,12 @@ export class Car {
   }
 
   applySafeSteer(steerInput) {
-    const speedRatio = Math.min(1.0, this.absVel / 55.0);
-    const reduction = 0.45 * speedRatio * speedRatio;
+    const c = this.cfg;
+    const refSpeed = c.steerSpeedReductionRef ?? 55.0;
+    const maxRed   = c.steerSpeedReduction    ?? 0.20;
+    if (maxRed <= 0) return steerInput;
+    const speedRatio = Math.min(1.0, this.absVel / refSpeed);
+    const reduction = maxRed * speedRatio * speedRatio;
     return steerInput * (1.0 - reduction);
   }
 
@@ -702,6 +706,16 @@ export class Car {
       if (typeof t.loadSensRefFz === 'number')     cfg.loadSensRefFz = t.loadSensRefFz;
       if (typeof t.relaxationLength === 'number')  cfg.relaxationLength = t.relaxationLength;
       if (typeof t.tireDriftBias === 'number')     cfg.tireDriftBias = t.tireDriftBias;
+    }
+
+    if (p.steering && cfg) {
+      const s = p.steering;
+      if (typeof s.maxAngleDeg === 'number') {
+        cfg.maxSteer = s.maxAngleDeg * Math.PI / 180;
+      }
+      if (typeof s.speedReductionPct === 'number') {
+        cfg.steerSpeedReduction = s.speedReductionPct / 100;
+      }
     }
   }
 

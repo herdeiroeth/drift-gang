@@ -9,6 +9,10 @@
   "engineInertia": 0.16,
   "turboMaxBoost": 1.2,
   "gearboxMode": "sequential",
+  "steering": {
+    "maxAngleDeg": 65,
+    "speedReductionPct": 10
+  },
   "tire": {
     "mu": 1.20,
     "loadSensN": 0.85,

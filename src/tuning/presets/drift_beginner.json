@@ -8,6 +8,10 @@
   "brakeBiasFront": 0.55,
   "engineInertia": 0.18,
   "turboMaxBoost": 0.8,
+  "steering": {
+    "maxAngleDeg": 50,
+    "speedReductionPct": 30
+  },
   "tire": {
     "mu": 1.25,
     "loadSensN": 0.90,

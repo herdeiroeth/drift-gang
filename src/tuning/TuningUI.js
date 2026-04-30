@@ -336,6 +336,13 @@ export class TuningUI {
     this._mkSlider(body, 'steerSatGain', 'SAT Input Gain', 0.0001, 0.003, 0.0001, 4,
       v => { if (this.car.cfg) this.car.cfg.steerSatGain = v; });
 
+    // ----- Steering (max angle + high-speed reduction assist) -----
+    body.appendChild(this._mkSection('Steering'));
+    this._mkSlider(body, 'maxSteerDeg', 'Max Steering Angle (°)', 30, 75, 1, 0,
+      v => { if (this.car.cfg) this.car.cfg.maxSteer = v * Math.PI / 180; });
+    this._mkSlider(body, 'steerSpeedReduction', 'High-Speed Reduction (%)', 0, 50, 1, 0,
+      v => { if (this.car.cfg) this.car.cfg.steerSpeedReduction = v / 100; });
+
     // ----- Suspension AAA-lite -----
     body.appendChild(this._mkSection('Suspension'));
     this._mkSlider(body, 'rideHeightMM', 'Ride Height / Rest (mm)', 240, 420, 5, 0,
@@ -584,6 +591,10 @@ export class TuningUI {
     this.controls.pneumTrailMM?.set((cfg.pneumTrail0 ?? 0.040) * 1000);
     this.controls.steerSatGain?.set(cfg.steerSatGain ?? 0.0008);
 
+    // Steering
+    this.controls.maxSteerDeg?.set((cfg.maxSteer ?? 1.0472) * 180 / Math.PI);
+    this.controls.steerSpeedReduction?.set((cfg.steerSpeedReduction ?? 0.20) * 100);
+
     // Suspension
     this.controls.rideHeightMM?.set((cfg.suspRestLength ?? 0.32) * 1000);
     this.controls.springFrontKN?.set((cfg.springRateFront ?? cfg.springRate ?? 52000) / 1000);
@@ -647,6 +658,10 @@ export class TuningUI {
         damperReboundRear: c.cfg?.damperReboundRear ?? 6200,
         antiRollFront: c.cfg?.antiRollFront ?? 13000,
         antiRollRear: c.cfg?.antiRollRear ?? 10500,
+      },
+      steering: {
+        maxAngleDeg: (c.cfg?.maxSteer ?? 1.0472) * 180 / Math.PI,
+        speedReductionPct: (c.cfg?.steerSpeedReduction ?? 0.20) * 100,
       },
     };
   }
@@ -753,6 +768,16 @@ export class TuningUI {
       if (typeof s.damperReboundRear === 'number') c.cfg.damperReboundRear = s.damperReboundRear;
       if (typeof s.antiRollFront === 'number') c.cfg.antiRollFront = s.antiRollFront;
       if (typeof s.antiRollRear === 'number') c.cfg.antiRollRear = s.antiRollRear;
+    }
+
+    if (d.steering && c.cfg) {
+      const s = d.steering;
+      if (typeof s.maxAngleDeg === 'number') {
+        c.cfg.maxSteer = s.maxAngleDeg * Math.PI / 180;
+      }
+      if (typeof s.speedReductionPct === 'number') {
+        c.cfg.steerSpeedReduction = s.speedReductionPct / 100;
+      }
     }
   }
 }
