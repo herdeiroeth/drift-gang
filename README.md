@@ -1,222 +1,252 @@
-# Drift Gang
+# DriftGang
 
-Jogo de drift 3D em **Three.js + Vanilla JS**, com física de carro implementada do zero — sem Cannon, sem Rapier, sem engine pronto. O modelo de pneu usa **Pacejka Magic Formula**, o powertrain é modular (motor, embreagem com Karnopp, gearbox H-pattern + sequential, diferenciais open/welded/LSD-Salisbury/Torsen), e o carro é tunável em tempo real por uma UI estilo **ForzaTune**.
+🏎️ **纯前端 3D 漂移模拟器** — 基于 Three.js 的零物理引擎漂移赛车游戏。自定义 RWD 物理、Pacejka 轮胎模型、模块化动力总成，全部用 Vanilla JS 实现。
 
-```
-http://localhost:5173/
-```
+🏎️ **Front-end 3D drift simulator** — Zero-physics-engine drift racing game built on Three.js. Custom RWD physics, Pacejka tire model, and modular powertrain, all in Vanilla JS.
 
-![Stack](https://img.shields.io/badge/Three.js-0.184-black) ![Vite](https://img.shields.io/badge/Vite-8.0-646cff) ![Vanilla JS](https://img.shields.io/badge/JS-ES%20Modules-yellow)
+[![zh](https://img.shields.io/badge/lang-zh--CN-blue.svg)](/README.md) [![en](https://img.shields.io/badge/lang-en-red.svg)](/README.md)
+
+![zh](https://img.shields.io/badge/lang-zh--CN-blue.svg)
+![en](https://img.shields.io/badge/lang-en-red.svg)
+
+[![Build](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/herdeiroeth/drift-gang)
+[![Tests](https://img.shields.io/badge/tests-42%20passing-brightgreen)](https://github.com/herdeiroeth/drift-gang)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](/LICENSE)
+[![Three.js](https://img.shields.io/badge/three.js-^0.184.0-orange)](https://threejs.org)
+[![Vite](https://img.shields.io/badge/vite-^8.2.1-purple)](https://vitejs.dev)
 
 ---
 
-## Por que existe
+`DriftGang` 是一个轻量级 3D 漂移赛车模拟器，100% 客户端运行。物理引擎完全自研，无 Cannon/Rapier 依赖。特点包括：Pacejka 魔术公式轮胎模型、模块化动力总成（发动机→离合器→变速箱→差速器→车轮）、实时调校 UI、赛道圈速计时、2D 赛道编辑器。
 
-Forza Motorsport e Assetto Corsa entregam um "feel" de drift que não vem de truque visual — vem de uma cadeia de subsistemas reais conversando entre si: curva de torque, embreagem com slip, diferencial com lock variável, pneu com peak de fricção, transferência de carga. Este projeto implementa essa cadeia em JavaScript puro, no browser, sem engine de física pronto.
+`DriftGang` is a lightweight 3D drift racing simulator that runs 100% client-side. Its physics engine is completely custom — no Cannon/Rapier dependency. Features include: Pacejka Magic Formula tires, modular powertrain (Engine→Clutch→Gearbox→Differential→Wheels), real-time tuning UI, lap timing, and a 2D track editor.
 
-A filosofia é **"modo Forza"**: assistências são configuráveis, defaults são tunáveis e nada é punitivo por padrão — mas a física por baixo é fiel o suficiente para que técnicas reais (clutch-kick, weight transfer, brake bias) funcionem como em sims AAA.
+**⚠️ 注意：** 此项目不包含后端或身份验证。所有数据存储在 `localStorage` 中。GLB 车型资产需要单独下载（CC-BY 4.0）。
+
+**⚠️ Note:** This project has no backend or authentication. All data is stored in `localStorage`. The GLB car model asset is external (CC-BY 4.0).
 
 ---
 
-## Como rodar
+## ✨ 功能特性 / Features
 
-Pré-requisitos: Node 18+ e npm.
+| 特性 | 说明 |
+|------|------|
+| 🏎️ 自定义 RWD 物理 | 4×子步进半隐式欧拉积分，独立悬挂每轮 |
+| 🔧 Powertrain 模块化 | 发动机（含扭矩曲线、怠速控制、限速器）、离合器（Karnopp 摩擦模型）、变速箱（H 型/序列式，含转速匹配）、差速器（开放式/焊接式/LSD/Torsen）、涡轮增压器、牵引力控制、起步控制 |
+| 🛞 Pacejka 魔术公式轮胎 | 侧向+纵向抓地力，摩擦椭圆耦合，负载敏感性，轮胎温度+衰退模型 |
+| 🎮 调校 UI | ForzaTune 风格面板，含最终传动比、各档位齿比、差速器设置、悬挂参数、预设系统 |
+| 🏁 赛道+计时系统 | 分段计时、最佳圈速持久化、无效圈检测 |
+| ✏️ 2D 赛道编辑器 | 在游戏内编辑赛道布局，支持碰撞点拖拽、持久化到 localStorage |
+| 📊 遥测+HUD | 可拖拽遥测面板、轮胎温度显示、抓地力探测、漂移计分+连击 |
+| 🎥 多视角相机 | 追逐/引擎盖/轨道模式 + Studio UI |
+| 💨 粒子效果 | 烟雾系统（GPU 粒子）+ 轮胎痕迹（动态四边形） |
+| 🔦 动态车灯 | PBR 材质、车灯控制、灯光秀 |
+
+---
+
+## 📦 快速开始 / Quick Start
 
 ```bash
-git clone https://github.com/herdeiroeth/drift-gang.git
+# 克隆仓库 / Clone the repository
+git clone <repo-url>
 cd drift-gang
-npm install
-npm run dev
+
+# 安装依赖 / Install dependencies
+pnpm install
+
+# 启动开发服务器 / Start dev server
+pnpm dev
+
+# 构建生产版本 / Production build
+pnpm build
+
+# 运行测试 / Run tests
+pnpm test
 ```
 
-Abra `http://localhost:5173/` e aperte `SPACE` na tela inicial.
+打开 Vite 输出的 URL（默认 `http://localhost:5173/`），按 **空格键** 开始游戏。
 
-Para build de produção:
+Open the URL printed by Vite (default `http://localhost:5173/`), press **Space** to start.
 
-```bash
-npm run build      # gera ./dist
-npm run preview    # serve o build localmente
-```
+> **注意：** 此项目使用 `pnpm` 作为包管理器。如果环境中设置了 `NODE_ENV=production`，请使用 `NODE_ENV=development pnpm install` 确保 devDependencies（如 Vite）被安装。
+>
+> **Note:** This project uses `pnpm` as the package manager. If `NODE_ENV=production` is set in your environment, use `NODE_ENV=development pnpm install` to ensure devDependencies (like Vite) are installed.
 
 ---
 
-## Controles
+## 🚀 使用方法 / Usage
 
-| Tecla | Ação |
-|---|---|
-| `W` / `↑` | Acelerar |
-| `S` / `↓` | Freio / ré |
-| `A` `D` / `←` `→` | Esterçar |
-| `Shift` | Freio de mão (handbrake) |
-| `Ctrl` | **Embreagem analógica** (hold-time: 1s pisa fundo, 0.33s solta) |
-| `Espaço` | Nitro / Start |
-| `Q` / `E` | Reduzir / Subir marcha (manual) |
-| `T` | Cicla TC (off → low → high) |
-| `Y` | Cicla diferencial (open → LSD → Torsen → welded) |
-| `U` | Cicla gearbox mode (H-pattern → sequential) |
-| `L` | **Arm/Disarm** Launch Control (2-step) |
-| `K` | Abrir/fechar **Tuning UI** |
-| `C` | Câmera (chase / hood / orbital) |
-| `R` | Reset do carro |
+### 控制器 / Controls
 
----
+| 按键 | 操作 |
+|-------|------|
+| `W` / `↑` | 加速 / Accelerate |
+| `S` / `↓` | 刹车/倒车 / Brake / Reverse |
+| `A` / `D` / `←` / `→` | 转向 / Steer |
+| `Shift` | 手刹 / Handbrake |
+| `Ctrl` | 离合器（按住时间=踩下深度） / Clutch (press duration = pedal depth) |
+| `Space` | 氮气加速 / Nitro / Start |
+| `Q` / `E` | 降档/升档 / Shift down/up |
+| `T` | 切换 TC 模式 / Cycle TC mode |
+| `Y` | 切换差速器类型 / Cycle diff type |
+| `U` | 切换变速箱模式 / Cycle gearbox mode |
+| `L` | 启用/禁用起步控制 / Toggle launch control |
+| `K` | 打开调校面板 / Open Tuning UI |
+| `C` | 切换视角 / Cycle camera |
+| `V` | Camera Studio |
+| `F` / `G` | 车灯 / 灯光秀 / Lights / Light show |
+| `H` | 切换遥测面板 / Toggle telemetry |
+| `M` | 打开赛道编辑器 / Open track editor |
+| `R` | 重置车辆 / Reset car |
 
-## O que está modelado
+### 预设 / Presets
 
-### Powertrain modular (`src/powertrain.js`)
+通过调校面板（按 `K`）可加载预设：
 
-```
-Engine → Clutch → Gearbox → Differential → Wheels
-              ↑           ↑
-        Karnopp slip  Sequential mode
-```
-
-- **Engine** — curva de torque interpolada, idle controller, rev limiter (hard / soft / 2-step), inércia rotacional, fricção (passive + linear + quadrática), **coast curve** (engine-braking real ao soltar o acelerador), stall + bump-start.
-- **Clutch** — modelo **Karnopp** com `T_friction = T_max · tanh(5·Δω)`. Stick suave abaixo de 0.5 rad/s, slip suave acima — sem chatter, sem boolean. Wear e temperatura integrados.
-- **Gearbox** — H-pattern (shift time 0.3s) ou **sequential** (0.06s + ignition cut + rev-match blip de 100ms em downshift). Auto-shift dinâmico baseado em throttle. 6 marchas + ré + neutro.
-- **Differential** — quatro tipos reais:
-  - `open` — split 50/50 fixo (burnout 1-roda quando uma rodadestraciona).
-  - `welded` — vínculo `ωL = ωR` real, via damping clampado a ~2000 Nm. Drift rei.
-  - `lsd_clutch` — Salisbury com `preload + powerLock·|T|·tan(45°)` (acelerando) ou `coastLock·|T|·tan(60°)` (em coast). Torque vai pra roda mais lenta.
-  - `torsen` — TBR (torque bias ratio) tipo `T_high = TBR · T_low`. Lock colapsa quando uma roda perde contato.
-- **TractionControl** — PID por slip ratio, modos `off / low / high`.
-- **LaunchControl** — 2-step rev limiter com **arm manual** (tecla L). Ativa em clutch>0.7 + throttle>0.8 + speed<1.5 m/s.
-- **Turbocharger** — spool exponencial, blow-off em release, formula AC: `T_final = T_base · (1 + boost)` (1 bar = +100% torque).
-
-### Modelo de pneu (`src/physics/Tire.js`)
-
-**Pacejka Magic Formula** simplificada com peak — não mais linear-saturado:
-
-```
-F_y = D·sin(C·atan(B·α − E·(B·α − atan(B·α))))
-F_x = D·sin(C·atan(B·κ − E·(B·κ − atan(B·κ))))
-```
-
-Com **círculo de fricção elíptico** acoplando longitudinal e lateral. Defaults seco/asfalto: lateral peak ~6° de slip angle, longitudinal peak ~10% de slip ratio. O eixo traseiro tem `driftBias` que sustenta o slide sob potência (não trava de volta no aperto da curva).
-
-### Tire heat + grip degradation
-
-Cada roda tem `tireTemp` (°C). Heat in vem de `slipPower = |F_long·vSlipLong| + |F_lat·vSlipLat|`. Heat out é proporcional a `(T - 25°C)`. O `mu` efetivo passado pra Pacejka é multiplicado por `gripFactor(T)`:
-
-| Temperatura | Grip factor |
-|---|---|
-| < 60°C (cold) | 0.85 |
-| 60–110°C (optimal) | 1.00 |
-| 110–150°C | 1.00 → 0.85 |
-| > 150°C (overheat) | 0.85 → 0.55 a 200°C |
-
-HUD mostra as 4 temperaturas coloridas em tempo real (azul / verde / laranja / vermelho).
-
-### Suspensão e dinâmica do chassis
-
-- 4 raycasts independentes (mola + amortecedor por roda).
-- Anti-roll bars front/rear (transfere carga pra roda externa em curvas).
-- Weight transfer longitudinal e lateral via aceleração local.
-- Pitch e roll dinâmicos do chassis (visual + funcional).
-- Inércia equivalente refletida do motor: `I_eq = I_wheel + (I_engine·(gear·diff)²)/2`. É por isso que cada marcha sente diferente.
-
-### Integrador
-
-Semi-implicit Euler em todas as integrações de `Car.doPhysics()`, com **sub-stepping 4×** por frame para estabilidade. Atualiza velocidade antes de posição, conserva energia em média.
-
-### Tuning UI estilo ForzaTune (`src/tuning/`)
-
-Tecla `K` abre painel overlay com:
-
-- **Sliders:** final drive, gear 1ª–6ª, diff power lock, diff coast lock, diff preload (Nm), brake bias, engine inertia, turbo max boost.
-- **Dropdowns:** tipo de diferencial, modo TC.
-- **Save / Load** via `localStorage` (chave `drift-game:tuning:current`).
-- **Presets de 1 clique:**
-  - `drift_beginner` — LSD 0.45/0.25, TC low, brake bias 55%, gear curtos.
-  - `drift_pro` — Welded, TC off, sequential gearbox, preload 150 Nm.
-  - `track` — LSD 0.30/0.40 (mais coast pra estabilizar), gear longo, brake bias 62%.
-  - `burnout` — Welded, gear 1ª 4.5, final drive 5.5, turbo 2.0 bar, inércia leve.
-
-Todas as mutações são in-place — a próxima chamada `update()` do powertrain já lê os novos valores.
+| 预设 | 风格 |
+|-------|------|
+| Drift Beginner | 新手漂移（宽容度高的操控） |
+| Drift Pro | 高级漂移（更真实的物理反馈） |
+| Track | 赛道驾驶（高抓地力） |
+| Burnout | 烧胎模式（锁定差速器+高转速） |
 
 ---
 
-## Estrutura
+## 🔧 架构 / Architecture
+
+```
+Browser (ES modules)
+├── Vite dev/build
+├── Three.js (render, loaders GLTF/HDR, Sky, PMREM)
+├── Game loop
+│   ├── Input → Car.doPhysics (4× sub-stepping)
+│   │            ├── Wheels + Tire (Pacejka MF)
+│   │            └── PowertrainSystem
+│   │                ├── Engine (torque curve, idle, rev-limit, coast)
+│   │                ├── Clutch (Karnopp tanh friction model)
+│   │                ├── Gearbox (H-pattern / sequential, auto-shift, gating)
+│   │                ├── Differential (open / welded / LSD / torsen)
+│   │                ├── TractionControl (PID slip-target)
+│   │                ├── LaunchControl (2-step rev limiter)
+│   │                └── Turbocharger (exponential spool, blow-off)
+│   ├── Track / LapSystem / Scenery
+│   ├── Particles (smoke GPU, skid quads)
+│   └── HUD + TuningUI + CameraStudio + Telemetry
+└── localStorage (setup, camera, track edits, best laps)
+```
+
+### 物理管线 / Physics Pipeline
+
+1. **输入处理** — 键盘/手柄轴
+2. **悬挂更新** — 每轮独立射线检测 + 弹簧/阻尼器
+3. **负载转移** — 防倾杆、纵向（含防点头/防蹲）、侧向
+4. **Ackermann 转向** — 内轮比外轮转更多
+5. **Powertrain** — 发动机扭矩 → 离合器 → 变速箱 → 差速器 → 车轮
+6. **轮胎力** — Pacejka Magic Formula + 摩擦椭圆 + 温度模型
+7. **SAT** — 主销回正力矩（机械拖距+气动拖距）
+8. **车身积分** — 半隐式 Euler，4×子步进
+
+### 项目结构 / Project Structure
 
 ```
 drift-gang/
-├── index.html
-├── style.css
+├── index.html                 # 入口点 + 叠加层 / Entry point + overlays
+├── style.css                  # 全局样式 / Global styles
 ├── package.json
+├── vitest.config.js           # 测试配置 / Test configuration
+├── LICENSE                    # MIT 许可证 / MIT License
+├── .npmrc                     # 包管理器配置 / Package manager config
+├── CLAUDE.md                  # AI 开发指南 / AI dev guide
+├── test/                      # 单元测试 / Unit tests
+│   ├── tire.test.js           #   Pacejka 轮胎模型测试 / Tire model tests
+│   └── powertrain.test.js     #   动力总成测试 / Powertrain tests
+├── public/
+│   ├── models/                # GLB 资产（未版本化） / GLB assets (not versioned)
+│   └── textures/              # 纹理 / Textures (asphalt, grass, sky)
 ├── src/
-│   ├── main.js                    # entry: import Game; new Game()
-│   ├── powertrain.js              # Engine, Clutch, Gearbox, Differential, TC, Launch, Turbo
-│   ├── core/
-│   │   ├── Game.js                # loop principal
-│   │   ├── Input.js               # keydown/keyup tracking
-│   │   └── constants.js           # GAME_CFG, PHYSICS_CFG (magic numbers nomeados)
-│   ├── physics/
-│   │   ├── Car.js                 # orquestra wheels + powertrain + sub-stepping
-│   │   ├── CarConfig.js           # massa, geometria, suspensão, gear ratios
-│   │   ├── Wheel.js               # raycast suspensão + chama Tire
-│   │   └── Tire.js                # Pacejka + círculo de fricção + heat/grip
-│   ├── rendering/
-│   │   ├── Camera.js              # chase / hood / orbital
-│   │   ├── Environment.js         # skybox shader + fog + lights
-│   │   ├── Arena.js               # ground procedural (textura asfalto)
-│   │   └── particles/
-│   │       ├── SmokeSystem.js     # GPU points
-│   │       └── SkidSystem.js      # quads dinâmicos
-│   ├── hud/
-│   │   └── HUDManager.js          # speed, RPM, gear, telemetria, tire temps, drift score
-│   └── tuning/
-│       ├── TuningUI.js            # painel ForzaTune
-│       └── presets/
-│           ├── drift_beginner.json
-│           ├── drift_pro.json
-│           ├── track.json
-│           └── burnout.json
-└── docs/                          # specs e pesquisas
-    ├── POWERTRAIN_DESIGN.md
-    ├── MODELO_FISICO_3D_PROPOSTA.md
-    ├── PESQUISA_*.md
-    └── CHANGELOG.md
+│   ├── main.js                # 入口 / Entry point
+│   ├── powertrain.js          # 动力总成系统 / Powertrain system
+│   ├── core/                  # 游戏核心 / Game core
+│   │   ├── Game.js            #   游戏循环 / Game loop
+│   │   ├── Input.js           #   输入处理 / Input handling
+│   │   └── constants.js       #   游戏常量 / Constants
+│   ├── physics/               # 物理引擎 / Physics engine
+│   │   ├── Car.js             #   车辆主类 / Car class
+│   │   ├── CarConfig.js       #   车辆配置 / Car configuration
+│   │   ├── Wheel.js           #   车轮 + 悬挂 / Wheel + suspension
+│   │   ├── Tire.js            #   Pacejka 轮胎模型 / Tire model
+│   │   └── SuspensionCorner.js # 单轮悬挂 / Corner suspension
+│   ├── rendering/             # 3D 渲染 / 3D rendering
+│   │   ├── Camera.js          #   相机控制 / Camera controls
+│   │   ├── Environment.js     #   环境 / Environment
+│   │   ├── Arena.js           #   竞技场 / Arena
+│   │   ├── Scenery.js         #   场景装饰 / Scenery
+│   │   ├── car/               #   车辆视觉 / Car visuals
+│   │   ├── materials/         #   PBR 材质 / PBR materials
+│   │   └── particles/         #   粒子系统 / Particles
+│   ├── tracks/ + track/       # 赛道系统 / Track system
+│   ├── editor/                # 赛道编辑器 / Track editor
+│   ├── hud/ + ui/ + tuning/   # 界面 / UI
+│   └── audio/                 # 音效 / Audio FX
+└── docs/                      # 开发文档 / Design docs
 ```
 
 ---
 
-## Inspirações e referências técnicas
+## 🧪 测试 / Tests
 
-- [Marco Monster — *Car Physics for Games*](http://www.asawicki.info/Mirror/Car%20Physics%20for%20Games/Car%20Physics%20for%20Games.html) — modelo lateral base.
-- [spacejack/carphysics2d](https://github.com/spacejack/carphysics2d) — port JS do Marco Monster.
-- [Vehicle Physics Pro (Edy)](https://vehiclephysics.com/) — arquitetura modular do powertrain (Engine / Clutch / Gearbox / Differential blocks).
-- [BeamNG.drive Powertrain Wiki](https://wiki.beamng.com/Powertrain.html) — tree de devices, torque-down + speed-up feedback.
-- [Assetto Corsa modding](https://www.overtake.gg/threads/engine-ini-explained.181061/) — formato `engine.ini` / `drivetrain.ini` (POWER + COAST + PRELOAD virou a interface do nosso `Differential`).
-- [Pacejka Magic Formula](http://www.racer.nl/reference/pacejka.htm) — modelo de pneu.
-- [Glenn Fiedler — *Integration Basics*](https://gafferongames.com/post/integration_basics/) — semi-implicit Euler.
-- [Erin Catto — *Numerical Methods* (GDC 2015)](https://box2d.org/files/ErinCatto_NumericalMethods_GDC2015.pdf).
-- [Karnopp friction model](https://academiaromana.ro/sectii2002/proceedings/doc2011-2/05-Bataus.pdf) — clutch slip suave via tanh.
+```bash
+pnpm test            # 运行所有测试 / Run all tests
+pnpm test:watch      # 监视模式 / Watch mode
+```
 
----
+目前 42 个测试覆盖：
 
-## Roadmap
+| 模块 | 测试数量 | 覆盖内容 |
+|------|---------|---------|
+| `Tire.js` | 22 | Pacejka MF 侧向/纵向、摩擦椭圆、胎温、负载敏感性、拖距、外倾角因素 |
+| `powertrain.js` | 20 | 发动机扭矩/限速/惯性、离合器摩擦/滑移、变速箱换挡/齿比、差速器 split、涡轮增压 |
 
-Próximos passos não-bloqueantes (em ordem de ROI percebido):
-
-- [ ] **Sons** — motor procedural (síntese baseada em RPM × throttle × load), turbo whistle, blow-off, tire screech.
-- [ ] **Pistas com geometria definida** (curvas designed, não só arena aberta).
-- [ ] **Sistema de cronometragem / volta**.
-- [ ] **Telemetria gráfica** (RPM/boost/throttle plots tipo MoTeC, debug overlay).
-- [ ] **AWD opcional** (diff central + diff dianteiro — hoje só RWD).
-- [ ] **Multiplayer local** (split-screen).
-- [ ] **Tuning UI: editor de curva de torque** (drag points como AC).
+42 unit tests currently cover:
+| Module | Tests | Coverage |
+|--------|-------|----------|
+| `Tire.js` | 22 | Pacejka MF lateral/longitudinal, friction ellipse, tire temp, load sensitivity, trail, camber |
+| `powertrain.js` | 20 | Engine torque/rev-limiter/inertia, clutch friction/slip, gearbox shifting/ratios, diff split, turbo |
 
 ---
 
-## Filosofia de código
+## ⚠️ 已知限制 / Known Limitations
 
-- **Sem TypeScript, sem framework.** Vanilla ES modules.
-- **Sem física pronta** — Cannon e Rapier estão fora. Tudo é integrado à mão.
-- **Magic numbers nomeados** em `src/core/constants.js`. Espalhar `0.992` solto pelo código é rejeitado.
-- **Unidades SI no código de física** (rad/s, Nm, m/s, kg). RPM aparece só na UI via `omegaToRPM()`.
-- **Semi-implicit Euler** em todas as integrações (atualiza `v` antes de `x`).
-- **Modular sobre monolito.** Cada subsistema é um arquivo independente que pode ser substituído sem refatorar o resto.
+| 方面 | 状态 | 说明 |
+|------|------|------|
+| 3D 车型资产 | 外部 | `bmw_m4_f82.glb` 不在仓库中（CC-BY 4.0），需手动下载 |
+| 听感 | 未实现 | 引擎声音、轮胎尖叫、涡轮泄气阀等音效待开发 |
+| 多人在线 | 未实现 | 本地分屏/网络多人待开发 |
+| AWD | 未实现 | 目前仅 RWD，AWD 需要中差+前差 |
+| 天气 | 未实现 | 雨天/湿地物理待开发 |
+| GLB 依赖 | 可选 | 无 GLB 时会回退到程序化生成的车辆视觉 |
+| 大块 JS | ~846KB | 代码拆分（code splitting）待优化 |
+
+| Aspect | Status | Note |
+|--------|--------|------|
+| 3D car asset | External | `bmw_m4_f82.glb` not in repo (CC-BY 4.0), download required |
+| Audio | TODO | Engine sounds, tire screech, turbo blow-off |
+| Multiplayer | TODO | Local split-screen / network multiplayer |
+| AWD | TODO | Currently RWD only |
+| Weather | TODO | Rain/wet surface physics |
+| GLB dependency | Optional | Falls back to procedural car visuals |
+| Chunk size | ~846KB | Code splitting needs optimization |
 
 ---
 
-Built with custom physics, no shortcuts.
+## 📄 许可证 / License
+
+MIT © [herdeiroeth](https://github.com/herdeiroeth)
+
+3D 车型资产：CC-BY 4.0（详见 `public/models/README.md`）
+
+Three.js / Vite：各自包的许可证适用范围。
+
+使用 ❤️ 和纯 JavaScript 打造，无第三方物理引擎。
+
+Built with ❤️ and zero third-party physics engines.

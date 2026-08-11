@@ -1,7 +1,9 @@
 """Inspect children meshes of mechanical parts (transforms + dimensions)."""
 import bpy
+import os
 
-GLB_PATH = "/Users/ryantrunquim/projects/drift-game/public/models/bmw_m4_f82.glb"
+# NOTE: before running, replace with the actual path to your GLB file
+GLB_PATH = os.path.join(os.path.dirname(__file__), "..", "public/models/bmw_m4_f82.glb")
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=GLB_PATH)
 bpy.context.view_layer.update()
